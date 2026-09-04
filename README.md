@@ -6,7 +6,7 @@ wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`) for tunneling traffic through it.
 ## Install
 
 ```bash
-git clone https://github.com/<owner>/ztrclient.git
+git clone https://github.com/igenius21fm/ztrclient.git
 cd ztrclient/ztrclient
 ```
 
