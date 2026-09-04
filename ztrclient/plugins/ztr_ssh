@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# ztr_ssh — client for the ztr_tunnel_lp.py control port. Assumes ztr_tunnel_lp.py
+# is already running as a persistent service (standalone, or under
+# systemctl) with its own fixed .ztr config. This script does NOT start or
+# stop that service — it just asks it, over the control port, to open one
+# on-demand session for a specific target, runs a real ssh through the
+# ephemeral local port it hands back, and tells it to close that session
+# again once ssh exits (for any reason — clean exit, Ctrl-C, dropped
+# connection). Every invocation gets its own local port, so running this
+# from several terminals at once against the same or different targets
+# never collides on "port already in use".
+#
+#   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--cp 2223] [--keep-host-key]
+#
+# ssh_flags are plain ssh options (-i identity, -l user, ciphers, etc.) —
+# no destination. This script always supplies the destination itself —
+# the local_ip/local_port the service allocated for this session (read
+# back from its response, not assumed) — since that's only known once the
+# session actually starts.
+#
+# Every session gets a fresh ephemeral port, so ssh sees a "new host" each
+# time and adds a fresh known_hosts entry for it — left alone, those pile
+# up forever. This script removes its own entry on exit (ssh-keygen -R)
+# unless you pass --keep-host-key.
+#
+# Tip: alias it in your shell rc so you can just type `ztr_ssh` from
+# anywhere instead of the full path — e.g. in ~/.zshrc:
+#   alias ztr_ssh="/path/to/package/ztr-client/plugins/ztr_ssh"
+set -u -o pipefail
+
+# Color only when stderr is an actual terminal — a pipe or log file gets
+# plain text, not raw escape codes.
+if [[ -t 2 ]]; then
+  C_INFO=$'\033[0;36m'   # cyan
+  C_OK=$'\033[0;32m'     # green
+  C_ERR=$'\033[0;31m'    # red
+  C_DIM=$'\033[2m'       # dim
+  C_RESET=$'\033[0m'
+else
+  C_INFO=""; C_OK=""; C_ERR=""; C_DIM=""; C_RESET=""
+fi
+
+log_info() { echo "${C_INFO}[ztr_ssh]${C_RESET} $*" >&2; }
+log_ok()   { echo "${C_OK}[ztr_ssh]${C_RESET} $*" >&2; }
+log_err()  { echo "${C_ERR}[ztr_ssh] $*${C_RESET}" >&2; }
+log_dim()  { echo "${C_DIM}[ztr_ssh] $*${C_RESET}" >&2; }
+
+REAL_HOST=""
+REAL_PORT="22"
+CONTROL_PORT="2223"
+KEEP_HOST_KEY=0
+SSH_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rh)
+      REAL_HOST="$2"
+      shift 2
+      ;;
+    --rp)
+      REAL_PORT="$2"
+      shift 2
+      ;;
+    --cp)
+      CONTROL_PORT="$2"
+      shift 2
+      ;;
+    --keep-host-key)
+      KEEP_HOST_KEY=1
+      shift
+      ;;
+    *)
+      SSH_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$REAL_HOST" ]]; then
+  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--cp 2223] [--keep-host-key]"
+  log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
+  exit 1
+fi
+
+# One request/response over a plain TCP socket, newline-delimited JSON in
+# both directions — see ztr_tunnel_lp.py's module docstring for the protocol.
+control_request() {
+  local payload="$1"
+  local response
+  exec 3<>"/dev/tcp/127.0.0.1/${CONTROL_PORT}" || return 1
+  printf '%s\n' "$payload" >&3
+  IFS= read -r response <&3
+  exec 3<&- 3>&-
+  printf '%s' "$response"
+}
+
+SESSION_ID=""
+LOCAL_IP=""
+LOCAL_PORT=""
+CLEANED_UP=0
+
+cleanup() {
+  # Idempotent — Ctrl+C can fire the INT trap and then the EXIT trap right
+  # after for the same exit, which would otherwise send END twice. Harmless
+  # either way (the second just gets "unknown session"), but no reason to.
+  if [[ "$CLEANED_UP" -eq 1 ]]; then
+    return
+  fi
+  CLEANED_UP=1
+  if [[ -n "$SESSION_ID" ]]; then
+    log_dim "ending session $SESSION_ID ..."
+    local end_payload
+    end_payload=$(python3 -c "import json,sys; print(json.dumps({'cmd': 'end', 'session_id': sys.argv[1]}))" "$SESSION_ID")
+    control_request "$end_payload" > /dev/null 2>&1 || true
+  fi
+  # A fresh ephemeral port every session means ssh sees a "new host" every
+  # time and adds a fresh known_hosts entry — left alone, these accumulate
+  # forever. Remove ours; harmless if ssh-keygen isn't found or nothing
+  # matches (e.g. the connection never got far enough to add one).
+  if [[ "$KEEP_HOST_KEY" -eq 0 && -n "$LOCAL_IP" && -n "$LOCAL_PORT" ]]; then
+    ssh-keygen -R "[${LOCAL_IP}]:${LOCAL_PORT}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+# Deliberately NOT trapping INT — ssh is a real interactive foreground
+# process and Ctrl+C is routine *inside* an ssh session (interrupting a
+# remote command), not a request to tear down the tunnel. ssh receives that
+# Ctrl+C directly (same foreground process group) and handles it itself;
+# bash's default behavior while waiting on a foreground child already does
+# the right thing here without a trap. EXIT still fires — and still runs
+# cleanup — however this script actually ends, including after ssh exits
+# because Ctrl+C eventually closed the whole session.
+trap 'cleanup; exit 143' TERM
+
+log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT} ..."
+
+START_PAYLOAD=$(python3 -c "
+import json, sys
+print(json.dumps({'cmd': 'start', 'relay_name': sys.argv[1], 'requested_port': int(sys.argv[2])}))
+" "$REAL_HOST" "$REAL_PORT")
+
+RESPONSE=$(control_request "$START_PAYLOAD")
+if [[ -z "$RESPONSE" ]]; then
+  log_err "no response from ztr_tunnel_lp.py on 127.0.0.1:${CONTROL_PORT} — is the service running?"
+  exit 1
+fi
+
+IFS=$'\t' read -r OK SESSION_ID LOCAL_IP LOCAL_PORT ERROR_MSG < <(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+print('\t'.join([str(d.get('status', False)), str(d.get('session_id', '')), str(d.get('local_ip') or '127.0.0.1'), str(d.get('local_port', '')), str(d.get('error') or '')]))
+" "$RESPONSE")
+
+if [[ "$OK" != "True" ]]; then
+  log_err "failed to start tunnel: ${ERROR_MSG:-unknown error}"
+  SESSION_ID=""   # nothing to end — the service never created a session
+  exit 1
+fi
+
+log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), connecting ssh ..."
+ssh "${SSH_ARGS[@]}" -p "$LOCAL_PORT" "$LOCAL_IP"
+SSH_EXIT=$?
+exit "$SSH_EXIT"

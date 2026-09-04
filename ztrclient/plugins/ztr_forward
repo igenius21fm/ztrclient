@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# ztr_forward — generic client for the ztr_tunnel_lp.py control port. Same
+# protocol ztr_ssh uses, but service-agnostic: the tunnel itself never cares
+# what's flowing through it (SSH, Postgres, RDP, whatever), only ztr_ssh
+# hardcodes running `ssh` at the end. This one either waits (so you can
+# point ANY client — a GUI app, psql, mysql, an RDP client, anything that
+# doesn't behave like a blocking foreground command the way ssh does — at
+# the tunneled port yourself) or runs a command you give it after `--`,
+# with the local port available to that command as $ZTR_LOCAL_PORT.
+#
+#   ztr_forward --rh "example._ztr" --rp 5432 [--cp 2223]
+#     -> opens the tunnel, prints the local address, waits for Ctrl+C to close it
+#
+#   ztr_forward --rh "example._ztr" --rp 5432 -- bash -c 'psql -h "$ZTR_LOCAL_IP" -p "$ZTR_LOCAL_PORT" -U myuser'
+#     -> opens the tunnel, runs the given command with $ZTR_LOCAL_IP and
+#        $ZTR_LOCAL_PORT set, ends the session once it exits, for any reason
+#
+# Note the single quotes and the bash -c wrapper in that second example —
+# $ZTR_LOCAL_IP/$ZTR_LOCAL_PORT aren't set yet when *your* shell parses the
+# command line, only once the tunnel is actually up. Double-quoting them
+# (or leaving out bash -c) would expand them to empty before this script
+# ever runs. $ZTR_LOCAL_IP is whatever ztr_tunnel_lp.py is actually bound
+# to (default 10.10.15.10, a dedicated address — see installer-linux.sh /
+# installer-macos.sh's --with-local-ip — not always 127.0.0.1), so don't hardcode 127.0.0.1 in
+# the wrapped command; use the env var.
+#
+# Requires ztr_tunnel_lp.py already running as a service — this script only
+# talks to its control port, it doesn't start or stop it.
+#
+# Tip: alias it in your shell rc, same as ztr_ssh — e.g. in ~/.zshrc:
+#   alias ztr_forward="/path/to/package/ztr-client/plugins/ztr_forward"
+set -u -o pipefail
+
+if [[ -t 2 ]]; then
+  C_INFO=$'\033[0;36m'
+  C_OK=$'\033[0;32m'
+  C_ERR=$'\033[0;31m'
+  C_DIM=$'\033[2m'
+  C_RESET=$'\033[0m'
+else
+  C_INFO=""; C_OK=""; C_ERR=""; C_DIM=""; C_RESET=""
+fi
+
+log_info() { echo "${C_INFO}[ztr_forward]${C_RESET} $*" >&2; }
+log_ok()   { echo "${C_OK}[ztr_forward]${C_RESET} $*" >&2; }
+log_err()  { echo "${C_ERR}[ztr_forward] $*${C_RESET}" >&2; }
+log_dim()  { echo "${C_DIM}[ztr_forward] $*${C_RESET}" >&2; }
+
+REAL_HOST=""
+REAL_PORT=""
+CONTROL_PORT="2223"
+CMD_ARGS=()
+HAS_CMD=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rh)
+      REAL_HOST="$2"
+      shift 2
+      ;;
+    --rp)
+      REAL_PORT="$2"
+      shift 2
+      ;;
+    --cp)
+      CONTROL_PORT="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      HAS_CMD=1
+      CMD_ARGS=("$@")
+      break
+      ;;
+    *)
+      log_err "unrecognized argument: $1"
+      log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--cp 2223] [-- command args...]"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$REAL_HOST" || -z "$REAL_PORT" ]]; then
+  log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--cp 2223] [-- command args...]"
+  log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
+  exit 1
+fi
+
+# One request/response over a plain TCP socket, newline-delimited JSON in
+# both directions — see ztr_tunnel_lp.py's module docstring for the protocol.
+control_request() {
+  local payload="$1"
+  local response
+  exec 3<>"/dev/tcp/127.0.0.1/${CONTROL_PORT}" || return 1
+  printf '%s\n' "$payload" >&3
+  IFS= read -r response <&3
+  exec 3<&- 3>&-
+  printf '%s' "$response"
+}
+
+SESSION_ID=""
+CLEANED_UP=0
+
+cleanup() {
+  # Idempotent — both an INT trap firing and the EXIT trap firing right
+  # after can otherwise send END twice for the same session. Harmless
+  # either way (the second just gets "unknown session"), but no reason to.
+  if [[ "$CLEANED_UP" -eq 1 ]]; then
+    return
+  fi
+  CLEANED_UP=1
+  if [[ -n "$SESSION_ID" ]]; then
+    log_dim "ending session $SESSION_ID ..."
+    local end_payload
+    end_payload=$(python3 -c "import json,sys; print(json.dumps({'cmd': 'end', 'session_id': sys.argv[1]}))" "$SESSION_ID")
+    control_request "$end_payload" > /dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+# INT is deliberately NOT trapped globally — in run mode (-- command...),
+# the wrapped command may be something that handles Ctrl+C itself (an
+# interactive psql session, ssh, etc.), and tearing the tunnel down out
+# from under it on every Ctrl+C would be wrong; bash's default behavior
+# while waiting on a foreground child already does the right thing without
+# a trap. Wait mode (no command) installs its own INT trap right before
+# blocking, below — there, Ctrl+C IS the intended way to stop.
+trap 'cleanup; exit 143' TERM
+
+log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT} ..."
+
+START_PAYLOAD=$(python3 -c "
+import json, sys
+print(json.dumps({'cmd': 'start', 'relay_name': sys.argv[1], 'requested_port': int(sys.argv[2])}))
+" "$REAL_HOST" "$REAL_PORT")
+
+RESPONSE=$(control_request "$START_PAYLOAD")
+if [[ -z "$RESPONSE" ]]; then
+  log_err "no response from ztr_tunnel_lp.py on 127.0.0.1:${CONTROL_PORT} — is the service running?"
+  exit 1
+fi
+
+IFS=$'\t' read -r OK SESSION_ID LOCAL_IP LOCAL_PORT ERROR_MSG < <(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+print('\t'.join([str(d.get('status', False)), str(d.get('session_id', '')), str(d.get('local_ip') or '127.0.0.1'), str(d.get('local_port', '')), str(d.get('error') or '')]))
+" "$RESPONSE")
+
+if [[ "$OK" != "True" ]]; then
+  log_err "failed to start tunnel: ${ERROR_MSG:-unknown error}"
+  SESSION_ID=""   # nothing to end — the service never created a session
+  exit 1
+fi
+
+if [[ "$HAS_CMD" -eq 1 ]]; then
+  log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), running command ..."
+  ZTR_LOCAL_IP="$LOCAL_IP" ZTR_LOCAL_PORT="$LOCAL_PORT" "${CMD_ARGS[@]}"
+  CMD_EXIT=$?
+  exit "$CMD_EXIT"
+fi
+
+log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID})"
+log_info "point your client at ${LOCAL_IP}:${LOCAL_PORT} — press Ctrl+C here to close the tunnel"
+# A trap merely running cleanup and returning does NOT terminate the
+# script — bash resumes right where the signal interrupted it, which here
+# means re-entering this loop and hanging forever instead of exiting.
+# Explicit exit is what actually stops it; 130 is the standard "killed by
+# SIGINT" exit code (128 + signal number).
+trap 'cleanup; exit 130' INT
+while :; do
+  sleep 3600 &
+  wait $!
+done
