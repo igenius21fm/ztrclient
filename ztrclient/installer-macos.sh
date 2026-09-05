@@ -207,14 +207,14 @@ uninstall() {
 
   local rc_file
   rc_file="$(detect_rc_file)"
-  local path_line="export PATH=\"$PREFIX:\$PATH\"  # added by ztr-client installer"
-  if [[ -f "$rc_file" ]] && grep -qF "# added by ztr-client installer" "$rc_file" 2>/dev/null; then
+  local path_line="export PATH=\"$PREFIX:\$PATH\"  # added by ztrclient installer"
+  if [[ -f "$rc_file" ]] && grep -qF "# added by ztrclient installer" "$rc_file" 2>/dev/null; then
     log_info "removing the PATH export and aliases we added to $rc_file ..."
     local tmp_rc
     tmp_rc="$(mktemp)"
     grep -vxF "$path_line" "$rc_file" > "$tmp_rc"
     for name in "${WRAPPERS[@]}"; do
-      local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztr-client installer"
+      local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
       grep -vxF "$alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     done
     mv "$tmp_rc" "$rc_file"
@@ -293,7 +293,7 @@ case ":$PATH:" in
     ;;
   *)
     RC_FILE="$(detect_rc_file)"
-    PATH_LINE="export PATH=\"$PREFIX:\$PATH\"  # added by ztr-client installer"
+    PATH_LINE="export PATH=\"$PREFIX:\$PATH\"  # added by ztrclient installer"
     ADD_TO_RC=0
     if [[ -t 0 ]]; then
       read -r -p "$PREFIX isn't on your PATH yet — add PATH + shell aliases for ztr_ssh/ztr_forward/ztr_pg to $RC_FILE? [y/N]: " ADD_TO_RC_ANSWER
@@ -308,7 +308,7 @@ case ":$PATH:" in
         { echo ""; echo "$PATH_LINE"; } >> "$RC_FILE"
       fi
       for name in "${WRAPPERS[@]}"; do
-        alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztr-client installer"
+        alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
         if ! grep -qxF "$alias_line" "$RC_FILE" 2>/dev/null; then
           echo "$alias_line" >> "$RC_FILE"
         fi
