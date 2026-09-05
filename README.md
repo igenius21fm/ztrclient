@@ -287,6 +287,10 @@ and any `.ztr` configs in it are left alone.
   (the persistent-service target).
 - `utils/crypt_bot.py` — RSA/AES helper used for signing and encrypting
   messages to the relay.
+- `routes/` — where your downloaded `.ztr` route configs go (see
+  [Getting connected](#getting-connected)). Ships empty (aside from its own
+  README) — the installer's `mkdir -p` would create it anyway, but it's
+  here from the start so it's not a surprise.
 - `installer-linux.sh` / `installer-macos.sh` — see [Install](#install).
 
 ## Example apps
