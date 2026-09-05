@@ -136,7 +136,7 @@ log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT} ..."
 
 START_PAYLOAD=$(python3 -c "
 import json, sys
-print(json.dumps({'cmd': 'start', 'relay_name': sys.argv[1], 'requested_port': int(sys.argv[2])}))
+print(json.dumps({'cmd': 'start', 'relay_name': sys.argv[1], 'target_port': int(sys.argv[2])}))
 " "$REAL_HOST" "$REAL_PORT")
 
 RESPONSE=$(control_request "$START_PAYLOAD")

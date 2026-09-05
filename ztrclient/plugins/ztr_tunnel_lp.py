@@ -40,7 +40,7 @@ from ztrClient import RelayClient, RelayConfig
     control server (default 127.0.0.1:2223) that speaks newline-delimited
     JSON, one request/response object per line:
 
-        START {"cmd": "start", "relay_name": "example._ztr", "requested_port": 22}
+        START {"cmd": "start", "relay_name": "example._ztr", "target_port": 22}
           -> {"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}
           -> {"status": false, "error": "..."}
 
@@ -50,7 +50,7 @@ from ztrClient import RelayClient, RelayConfig
 
         LIST  {"cmd": "list"}
           -> {"status": true, "sessions": [
-                {"session_id": "...", "relay_name": "...", "requested_port": 22,
+                {"session_id": "...", "relay_name": "...", "target_port": 22,
                  "local_ip": "10.10.15.10", "local_port": 51234,
                  "active_connections": 1, "idle_seconds": 0.0}
               ]}
@@ -130,7 +130,7 @@ class TunnelProxyServer:
 
         # Loaded once at startup — resolves the framing/service settings
         # every session shares. The .ztr config is fixed for this service's
-        # lifetime; a given session's target (relay_name/requested_port) is
+        # lifetime; a given session's target (relay_name/target_port) is
         # supplied per START request instead, not read from here.
         conf = RelayConfig(config_file=config_file)
 
@@ -144,10 +144,10 @@ class TunnelProxyServer:
         # restriction. Nothing downstream cares what's actually forwarded.
         self.relay_port = conf.service("ssh")["port"]
 
-    def _new_client(self, relay_name: str, requested_port: int) -> RelayClient:
+    def _new_client(self, relay_name: str, target_port: int) -> RelayClient:
         client = RelayClient(relay_name, self.relay_port, config_file=self.config_file)
         client.with_worker_id(next(self._worker_ids))
-        client.set_requested_port(requested_port)
+        client.set_target_port(target_port)
         return client
 
     def setup_tunnel(self, client: RelayClient, native: bool = False) -> bool:
@@ -220,8 +220,8 @@ class TunnelProxyServer:
 
     # ---------- session lifecycle (START / END) ----------
 
-    async def start_session(self, relay_name: str, requested_port: int) -> dict:
-        client = self._new_client(relay_name, requested_port)
+    async def start_session(self, relay_name: str, target_port: int) -> dict:
+        client = self._new_client(relay_name, target_port)
         if not self.setup_tunnel(client, native=False):
             return {"status": False, "error": "failed to activate tunnel"}
 
@@ -251,7 +251,7 @@ class TunnelProxyServer:
         local_port = server.sockets[0].getsockname()[1]
         self._sessions[session_id] = Session(client=client, server=server, local_port=local_port)
 
-        print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{requested_port}")
+        print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port}")
         return {"status": True, "session_id": session_id, "local_ip": self.local_ip, "local_port": local_port}
 
     async def end_session(self, session_id: str) -> dict:
@@ -267,14 +267,14 @@ class TunnelProxyServer:
     def list_sessions(self) -> dict:
         """Read-only snapshot for anything wanting to show what's currently
         open — a GUI dashboard, a status CLI, whatever. relay_name and
-        requested_port aren't stored on Session itself; they're read
+        target_port aren't stored on Session itself; they're read
         straight off each session's already-authorized RelayClient."""
         now = time.monotonic()
         sessions = [
             {
                 "session_id": session_id,
                 "relay_name": session.client.TARGET_HOST,
-                "requested_port": session.client.REQUESTED_PORT,
+                "target_port": session.client.TARGET_PORT,
                 "local_ip": self.local_ip,
                 "local_port": session.local_port,
                 "active_connections": session.active_connections,
@@ -321,7 +321,7 @@ class TunnelProxyServer:
                 cmd = request.get("cmd")
                 if cmd == "start":
                     response = await self.start_session(
-                        request["relay_name"], int(request.get("requested_port", 22))
+                        request["relay_name"], int(request.get("target_port", 22))
                     )
                 elif cmd == "end":
                     response = await self.end_session(request["session_id"])

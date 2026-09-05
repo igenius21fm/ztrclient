@@ -285,8 +285,16 @@ class RelayClient(RelayConfig):
         super().__init__(config_file=config_file)
         self.tunnel_cache = TunnelCache()
         self.TARGET_HOST = target_host
+        # PORT and TARGET_PORT are NOT the same thing, even though
+        # TARGET_PORT defaults to whatever PORT is passed in here. PORT is
+        # this tunnel's own listening_port, sent to the entry hop as part of
+        # the hop-authorization request (see request_hop_authorization()) —
+        # it identifies this session, it isn't where traffic ends up. The
+        # real destination is TARGET_HOST:TARGET_PORT — where the exit hop
+        # actually connects — and it can be changed independently at any
+        # time before authorization via set_target_port().
         self.PORT = port
-        self.REQUESTED_PORT = port # by default
+        self.TARGET_PORT = port # by default — override with set_target_port()
         self.DB_PATH = f"{self.SCRIPT_DIR}/{db_name}"
         self.failed_hops = set()
 
@@ -321,9 +329,9 @@ class RelayClient(RelayConfig):
         self.timing_defense = False
         self.secure_transport = False
 
-    def set_requested_port(self,port: int):
-        """ This is actually where the exit hop will connect to {TARGET_HOST}:{self.REQUESTED_PORT}"""
-        self.REQUESTED_PORT = port
+    def set_target_port(self,port: int):
+        """ This is actually where the exit hop will connect to {TARGET_HOST}:{self.TARGET_PORT}"""
+        self.TARGET_PORT = port
     @property
     def __ENTRY__(self):
         return self.chain[0]
@@ -446,7 +454,7 @@ class RelayClient(RelayConfig):
         components = [str(x) for x in [
             self.route_id,
             self.hopsKeyRepresentation(), 
-            self.REQUESTED_PORT, 
+            self.TARGET_PORT, 
             self.PORT, 
             self.TARGET_HOST, 
             ttl, 
@@ -474,7 +482,7 @@ class RelayClient(RelayConfig):
             return cached_response
 
         self._shuffle_hops()
-        finalDst = f"{self.TARGET_HOST}:{self.REQUESTED_PORT}"
+        finalDst = f"{self.TARGET_HOST}:{self.TARGET_PORT}"
         try:
             final_dst_for_exit = base64.b64encode(
                 self._encrypt_for(self.exit_hop, finalDst)
