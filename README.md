@@ -122,25 +122,149 @@ and wired into the service unit.
 answer with a garbage/nonexistent path — the installer skips service setup
 cleanly and tells you to re-run with `--with-service` once you have one.
 
-## Registering your RSA key
+## Getting connected
 
-Before you can create a route, register an RSA key from your dashboard's
-Keys panel. It'll give you a one-time nonce to sign, proving you hold the
-matching private key. Sign it with `launcher.py` — **using the venv the
-installer just set up**, not your system `python3`:
+Five steps, in this order — skipping ahead (e.g. creating a route before
+your key is verified, or running the client before the config is in place)
+is the single most common way to get stuck. Each step links to its
+[Troubleshooting](#troubleshooting) entry.
+
+**1. Run the installer** (see [Install](#install) above) — it needs to run
+first: it's what creates the venv `launcher.py` and every plugin depend on,
+and the `routes/` folder your config goes into later.
+→ Stuck here? See [Installing](#installing).
+
+**2. Register an RSA key.** In your dashboard's Keys panel, click **Nonce**
+to get a one-time challenge, then sign it — **using the venv the installer
+just set up**, not your system `python3`:
 
 ```bash
 ~/.local/share/ztr/venv/bin/python3 launcher.py
 ```
 
-(Running it with your system `python3` instead fails with
-`ModuleNotFoundError: No module named 'Crypto'` — `pycryptodome` only lives
-in that venv.) It prints your public key, then prompts `Nonce To Sign:` —
-paste in the nonce from the dashboard, and it prints back a signature (hex)
-to paste into the form. It reuses the same keypair every time you run it,
+It prints your public key, then prompts `Nonce To Sign:` — paste in the
+nonce the panel just gave you. It prints back a signature (hex); paste
+*that*, plus the public key it printed and your account's secret key, into
+the form and submit. It reuses the same keypair every time you run it,
 generating one on first run if none exists yet (`privateKey.pem` /
 `publicKey.pem`, next to `ztrClient.py` — unique per install, never shipped
 in this repo).
+→ Stuck here? See [Registering a key](#registering-a-key).
+
+**3. Create a route, bound to that key.** In the Routes panel, pick the key
+you just registered, an exit country, and a hop count.
+→ Stuck here? See [Creating a route](#creating-a-route).
+
+**4. Download the route's config and place it correctly.** Click
+**Download .ztr** on the route, then:
+
+```bash
+mv ~/Downloads/<name>.ztr ztrclient/routes/
+```
+
+Open it and replace the `"secret_key": "<your secret_key>"` placeholder
+with your real account secret key (the same one used in step 2 — shown
+once at account registration, or after **Account → Regenerate secret
+key**) — the server only ever stores a hash of it, so it can't fill this
+in for you.
+→ Stuck here? See [The config file](#the-config-file).
+
+**5. Run it.** Easiest: use one of the plugin wrappers directly — after
+step 1, these are already on your `PATH`:
+
+```bash
+ztr_ssh --rh "example._ztr" --rp 22
+```
+
+Or, writing your own script against `RelayClient` directly:
+
+```python
+from ztrClient import RelayClient
+
+client = RelayClient(target_host="example._ztr", port=22, config_file="<name>.ztr")
+result = client.set_tunnel()
+if result and result.get("status"):
+    print("Tunnel established:", client.session_id)
+else:
+    print("Failed to establish tunnel:", result)
+```
+
+run with the venv's interpreter, same as everything else here:
+`~/.local/share/ztr/venv/bin/python3 your_script.py`.
+
+## Troubleshooting
+
+### Installing
+
+**`Failed to connect to user scope bus via local transport... XDG_RUNTIME_DIR
+not defined`** — you ran the installer with `sudo`. Run it as your normal
+user instead; it prompts for `sudo` itself on the one piece that actually
+needs it (the dummy network interface).
+
+**`permission denied` on `./installer-linux.sh`** — you're on a release zip
+built before v1.0.2, which shipped without the executable bit. Either
+`chmod +x installer-linux.sh installer-macos.sh` yourself, or re-download
+the [latest release](https://github.com/igenius21fm/ztrclient/releases/latest).
+
+**`couldn't create the venv — ... sudo apt install python3-venv`** (Linux)
+— Debian/Ubuntu split the stdlib `venv` module into its own package; the
+installer already tells you the exact command, just run it and re-run the
+installer.
+
+### Registering a key
+
+**`ModuleNotFoundError: No module named 'Crypto'`** running `launcher.py`
+— you used your system `python3` instead of the venv's. Use
+`~/.local/share/ztr/venv/bin/python3 launcher.py` instead.
+
+**`invalid_nonce` / "Nonce is unknown, already used, or expired"** — nonces
+are single-use and expire 5 minutes after you click **Nonce**. If you
+clicked it more than once, sign and submit the *most recent* one, not an
+earlier one still sitting in your terminal history. Just click **Nonce**
+again and re-sign if it's been a few minutes.
+
+**`invalid_signature` / "Signature does not match public key"** — usually
+one of: you signed a different nonce than the one currently shown in the
+form (re-fetch and re-sign to be sure they match), you pasted an
+incomplete PEM (missing the `-----BEGIN/END PUBLIC KEY-----` lines
+`launcher.py` printed), or you copied the signature with extra
+whitespace/newlines around it.
+
+**`invalid_secret_key`** — the account secret key you entered doesn't match.
+It's shown once, either right after registration or after **Account →
+Regenerate secret key** — if you don't have it saved, regenerate it (this
+invalidates the old one).
+
+### Creating a route
+
+**`invalid_pubkey` / "That key isn't a verified key on your account"** —
+either your key registration from step 2 didn't actually succeed (check the
+Keys panel — it should be listed there), or you're picking a key that's
+since been revoked.
+
+**`no_active_plan`** — you need an active paid plan before you can create
+any route.
+
+**`account_suspended`** — your balance ran out (or a payment failed) and
+your account was suspended; top up your balance to reactivate it.
+
+**`route_limit_reached`** — you're at your plan's concurrent-route cap;
+delete an existing route or upgrade your plan.
+
+### The config file
+
+**`ConfigNotFoundError: no .ztr config at .../routes/<name>.ztr — place it
+in routes/ next to ztrClient.py`** — the file has to be inside `ztrclient`'s
+own `routes/` folder specifically, not your current directory, not
+`~/Downloads`, and not `ztrclient`'s own top-level folder either.
+
+**Connects, but nothing happens / hangs / fails silently** — the single
+most common cause is forgetting to replace the `"secret_key": "<your
+secret_key>"` placeholder in the downloaded file with your real one. This
+doesn't raise a Python exception — bad tunnel authorization is caught
+internally and logged, not raised, so check `ztrclient.log` (next to
+`ztrClient.py`) for what actually went wrong instead of expecting a
+traceback.
 
 ## Uninstall
 
@@ -153,23 +277,12 @@ the PATH/alias lines from your rc file, and the dummy IP/interface (if any)
 — everything the installer added, and nothing else. Your `routes/` folder
 and any `.ztr` configs in it are left alone.
 
-## Troubleshooting
-
-**`Failed to connect to user scope bus via local transport... XDG_RUNTIME_DIR
-not defined`** — you ran the installer with `sudo`. Run it as your normal
-user instead; it prompts for `sudo` itself on the one piece that actually
-needs it (the dummy network interface).
-
-**`ModuleNotFoundError: No module named 'Crypto'`** running `launcher.py`
-(or any plugin) directly — you're using your system `python3` instead of
-the venv's. Use `~/.local/share/ztr/venv/bin/python3` instead (see
-[Registering your RSA key](#registering-your-rsa-key) above).
-
 ## Layout
 
 - `ztrClient.py` — the core relay client (`RelayConfig`/`RelayClient`).
 - `launcher.py` — standalone tool for signing a dashboard nonce with your
-  RSA key (see above) — not the client entry point itself.
+  RSA key (see [Getting connected](#getting-connected)) — not the client
+  entry point itself.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, and `ztr_tunnel_lp.py`
   (the persistent-service target).
 - `utils/crypt_bot.py` — RSA/AES helper used for signing and encrypting
