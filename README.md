@@ -29,8 +29,8 @@ or grab a specific [release](https://github.com/igenius21fm/ztrclient/releases)
 zip instead, if you'd rather pin a version than track `main`:
 
 ```bash
-curl -LO https://github.com/igenius21fm/ztrclient/releases/download/v1.0.1/ztrclient-v1.0.1.zip
-unzip ztrclient-v1.0.1.zip
+curl -LO https://github.com/igenius21fm/ztrclient/releases/download/v1.0.2/ztrclient-v1.0.2.zip
+unzip ztrclient-v1.0.2.zip
 cd ztrclient
 ```
 
