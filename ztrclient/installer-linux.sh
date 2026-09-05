@@ -245,6 +245,22 @@ uninstall() {
 [[ "$UNINSTALL" -eq 1 ]] && uninstall
 
 # ---------------------------------------------------------------------------
+# Run as yourself, not root — a very easy mistake on a Pi/VPS where sudo is
+# passwordless or habitual. Under `sudo ./installer-linux.sh`, $HOME is
+# root's, so the venv and wrapper symlinks land in the wrong place, and (if
+# --with-service is used) `systemctl --user` targets root's session bus,
+# which usually isn't running — that's the
+# "Failed to connect to user scope bus ... XDG_RUNTIME_DIR not defined"
+# error. The few commands that do need privilege (--with-local-ip's dummy
+# interface) already call sudo themselves, just for that piece.
+if [[ "$(id -u)" -eq 0 ]] && [[ -z "${ZTR_ALLOW_ROOT:-}" ]]; then
+  log_err "running as root (or via sudo) — re-run this as your normal user instead, without sudo."
+  log_warn "it'll prompt for your password itself on the one part that actually needs it"
+  log_warn "(--with-local-ip's dummy network interface). If you really do mean to install this"
+  log_warn "for root specifically, set ZTR_ALLOW_ROOT=1 to skip this check."
+  exit 1
+fi
+
 log_info "checking prerequisites ..."
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -386,6 +402,19 @@ if [[ "$WITH_SERVICE" -eq 1 ]]; then
   if ! command -v systemctl >/dev/null 2>&1; then
     log_err "systemctl not found — this installer is Linux/systemd-specific. On macOS, use installer-macos.sh instead."
     log_warn "run it standalone instead: $VENV_PY $SCRIPT_DIR/plugins/ztr_tunnel_lp.py --config-file route.ztr"
+  elif [[ -z "${XDG_RUNTIME_DIR:-}" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
+    # "Failed to connect to user scope bus via local transport ..." — no
+    # systemd --user session/D-Bus reachable for this account. Common when
+    # you su/sudo'd into this user instead of logging in as them directly,
+    # or you're in a container/WSL setup where systemd --user never started
+    # for anyone. Caught here, before asking for a config path, rather than
+    # letting the raw dbus error below kill the script under `set -e`.
+    log_err "no systemd --user session available for this account (XDG_RUNTIME_DIR unset, or its D-Bus isn't reachable)."
+    log_warn "if you reached this shell via su/sudo into this user: log in directly as them instead (SSH or"
+    log_warn "console) and re-run. If you're already logged in directly: try 'loginctl enable-linger \$USER',"
+    log_warn "then log out and back in. If systemd doesn't run here at all (containers, WSL without systemd"
+    log_warn "enabled), --with-service can't work — run the tunnel yourself instead, in the foreground:"
+    log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_tunnel_lp.py --config-file <name>.ztr --local-ip $LOCAL_IP"
   else
     read -r -p "Path to your downloaded .ztr route config: " ZTR_CONFIG_SRC
     if [[ ! -f "$ZTR_CONFIG_SRC" ]]; then
