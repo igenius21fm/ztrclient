@@ -328,6 +328,14 @@ class RelayClient(RelayConfig):
         self.worker_id = ""
         self.timing_defense = False
         self.secure_transport = False
+        self.we_recipient_pubkey_path = None
+        # Deliberately never the same object as self.crypt (which signs/
+        # encrypts hop-authorization traffic with this client's own
+        # relay identity) — separation of duties: a target reached via
+        # with_encryption() should never need to know or trust this
+        # client's hop-facing keypair, only whatever keypair it was
+        # actually given here.
+        self._e2e_crypt = None
 
     def set_target_port(self,port: int):
         """ This is actually where the exit hop will connect to {TARGET_HOST}:{self.TARGET_PORT}"""
@@ -442,8 +450,40 @@ class RelayClient(RelayConfig):
         self.timing_defense = enabled
         return self
     
-    def with_encryption(self, enabled: bool = True):
+    def with_encryption(self, recipient_pubkey_path: str = None, own_private_key: str = None, own_public_key: str = None, enabled: bool = True):
+        """
+        `enabled` alone (no recipient_pubkey_path) just sets secure_transport
+        — communicated to the hop chain so the exit hop also encrypts its
+        own final leg to target_host:target_port (see struct_payload()).
+        That's the whole original behavior, and every existing caller that
+        only wants this (ZtrRequestsClient, RCWorkers — they already run
+        their own separate end-to-end crypto layer) keeps working exactly
+        as before.
+
+        Passing `recipient_pubkey_path` additionally makes send_HTH/recv_HTH
+        themselves sign+encrypt/decrypt+verify the payload end-to-end
+        against it, using a dedicated keypair — own_private_key/
+        own_public_key if given, otherwise one generated on first use
+        (reused after that) at e2ePrivateKey.pem/e2ePublicKey.pem next to
+        this script. Deliberately never self.crypt's own keypair (used for
+        hop authorization) — keep this identity separate, so a target only
+        ever needs to trust the keypair you actually hand it here, not this
+        client's relay identity.
+        """
         self.secure_transport = enabled
+        if recipient_pubkey_path is None:
+            return self
+
+        self.we_recipient_pubkey_path = recipient_pubkey_path
+        try:
+            self._e2e_crypt = CryptBot(
+                pathPrivateKey=own_private_key or f"{self.SCRIPT_DIR}/e2ePrivateKey.pem",
+                pathPublicKey=own_public_key or f"{self.SCRIPT_DIR}/e2ePublicKey.pem",
+                pathRecipientPublicKey=recipient_pubkey_path,
+            )
+            self._e2e_crypt.create_keys(rsa_size=2048, reuse=True)
+        except Exception as e:
+            raise CryptoError(f"couldn't set up end-to-end encryption keypair: {e}") from e
         return self
     
     def set_log(self, msg:str):
@@ -570,6 +610,19 @@ class RelayClient(RelayConfig):
         """ Use this send your data"""
         # session_id len is always 64
         session_bytes = session_id.encode("utf-8")
+
+        if self._e2e_crypt is not None:
+            # Set only if with_encryption() was given a recipient_pubkey_path
+            # — independent of self.secure_transport, which just flags the
+            # hop chain for its own unrelated final-leg encryption (see
+            # struct_payload()). self._e2e_crypt, never self.crypt — that's
+            # a completely different CryptBot instance used for hop
+            # authorization traffic; keeping them separate is the point.
+            try:
+                payload = self._e2e_crypt.encrypt_sign_BytesPayload(payload)
+            except Exception as e:
+                raise CryptoError(f"failed to encrypt outgoing end-to-end payload: {e}") from e
+
         header = struct.pack(">I64s", len(payload), session_bytes)
         # Send header (68 bytes total) + payload
         try:
@@ -596,4 +649,19 @@ class RelayClient(RelayConfig):
             payload = recv_exact(sock, payload_len)
         except (OSError, ConnectionError) as e:
             raise NetworkError(f"connection dropped while receiving data over the tunnel: {e}") from e
+
+        if self._e2e_crypt is not None:
+            # Mirrors send_HTH's check — see with_encryption(). Independent
+            # of self.secure_transport, same reasoning as send_HTH above.
+            try:
+                decrypted = self._e2e_crypt.decrypt_msg_verifyBytesPayload(payload, as_="bytes")
+            except Exception as e:
+                raise CryptoError(f"failed to decrypt incoming end-to-end payload: {e}") from e
+            if decrypted is None:
+                raise CryptoError(
+                    "signature verification failed on incoming end-to-end payload — "
+                    "recipient_pubkey_path passed to with_encryption() may not match the actual sender"
+                )
+            payload = decrypted
+
         return payload, session_id
