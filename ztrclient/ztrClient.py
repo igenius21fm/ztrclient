@@ -214,9 +214,18 @@ class TunnelCache:
                         session_id TEXT PRIMARY KEY,
                         tunnel_id TEXT NOT NULL,
                         response_json TEXT NOT NULL,
-                        expires_at REAL NOT NULL
+                        expires_at REAL NOT NULL,
+                        port INTEGER
                     )
                 """)
+                # A tunnel_cache.db from before port tracking existed won't
+                # have this column — the CREATE above is a no-op against an
+                # existing table, so add it explicitly. Fails harmlessly
+                # (already exists) on a fresh db, where CREATE just made it.
+                try:
+                    conn.execute("ALTER TABLE tunnel_cache ADD COLUMN port INTEGER")
+                except sqlite3.OperationalError:
+                    pass
                 conn.commit()
         except sqlite3.Error as e:
             raise CacheError(f"couldn't initialize tunnel cache at {self.db_path}: {e}") from e
@@ -254,25 +263,60 @@ class TunnelCache:
         except sqlite3.Error as e:
             _cache_logger.warning(f"tunnel cache delete failed for {tunnel_id[:8]}...: {e}")
 
-    def set(self, tunnel_id: str,session_id:str, response_dict: dict, ttl_seconds: int):
+    def set(self, tunnel_id: str,session_id:str, response_dict: dict, ttl_seconds: int, port: int = None):
         """Store response in cache with expiration. Best-effort — a failed
         write just means the next call re-authorizes instead of hitting the
-        cache, not a reason to fail the whole tunnel request."""
+        cache, not a reason to fail the whole tunnel request. `port` is
+        recorded purely so port_usage_counts() below can see it — it plays
+        no role in cache lookup/expiry."""
         expires_at = time.time() + ttl_seconds
         response_json = json.dumps(response_dict)
         try:
             with self._get_connection() as conn:
                 conn.execute("""
-                    INSERT INTO tunnel_cache (tunnel_id,session_id, response_json, expires_at)
-                    VALUES (?,?,?,?)
+                    INSERT INTO tunnel_cache (tunnel_id,session_id, response_json, expires_at, port)
+                    VALUES (?,?,?,?,?)
                     ON CONFLICT(session_id) DO UPDATE SET
                         tunnel_id = excluded.tunnel_id,
                         response_json=excluded.response_json,
-                        expires_at=excluded.expires_at
-                """, (tunnel_id,session_id,response_json, expires_at))
+                        expires_at=excluded.expires_at,
+                        port=excluded.port
+                """, (tunnel_id,session_id,response_json, expires_at, port))
                 conn.commit()
         except sqlite3.Error as e:
             _cache_logger.warning(f"tunnel cache write failed for {tunnel_id[:8]}...: {e}")
+
+    def port_usage_counts(self, candidate_ports: list) -> dict:
+        """
+        Count of currently-active (non-expired, cached) tunnels per port,
+        for each of candidate_ports — 0 for any with none. Local-only
+        signal: this machine's tunnel_cache.db (shared by every ztrClient
+        process using the same db_path, which is every one by default,
+        since it's SCRIPT_DIR-relative), not the entry hop's own real
+        traffic — used by RelayClient's automatic port selection (see
+        RelayClient.__init__) to spread new tunnels across
+        hop_settings.services_ports instead of always picking the first.
+        Falls back to reporting every candidate as equally free (all 0) on
+        a read failure, same reasoning as get()/set() — an unreadable
+        cache should never block port selection.
+        """
+        now = time.time()
+        counts = {p: 0 for p in candidate_ports}
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM tunnel_cache WHERE expires_at <= ?", (now,))
+                conn.commit()
+                cursor.execute(
+                    "SELECT port, COUNT(*) FROM tunnel_cache WHERE expires_at > ? GROUP BY port",
+                    (now,)
+                )
+                for port, count in cursor.fetchall():
+                    if port in counts:
+                        counts[port] = count
+        except sqlite3.Error as e:
+            _cache_logger.warning(f"tunnel cache port-usage query failed, treating all candidate ports as equally free: {e}")
+        return counts
 
 class RelayClient(RelayConfig):
     """
@@ -281,10 +325,16 @@ class RelayClient(RelayConfig):
     end-state payload for the target.
     """
 
-    def __init__(self, target_host: str, port: int, db_name: str = "pr.db", debug=False, config_file = None):
+    def __init__(self, target_host: str, port: int = None, db_name: str = "pr.db", debug=False, config_file = None):
         super().__init__(config_file=config_file)
         self.tunnel_cache = TunnelCache()
         self.TARGET_HOST = target_host
+        # port=None auto-selects one of hop_settings.services_ports based on
+        # local usage — see _auto_select_port(). Needs self.tunnel_cache and
+        # RelayConfig's settings() (from super().__init__() above) already
+        # in place, which is why this can't move any earlier.
+        if port is None:
+            port = self._auto_select_port()
         # PORT and TARGET_PORT are NOT the same thing, even though
         # TARGET_PORT defaults to whatever PORT is passed in here. PORT is
         # this tunnel's own listening_port, sent to the entry hop as part of
@@ -336,6 +386,23 @@ class RelayClient(RelayConfig):
         # client's hop-facing keypair, only whatever keypair it was
         # actually given here.
         self._e2e_crypt = None
+
+    def _auto_select_port(self) -> int:
+        """
+        Picks a port from hop_settings.services_ports automatically, based on
+        how many currently-active (non-expired) tunnels this machine already
+        has open per port — least-used wins, random tiebreak. Local knowledge
+        only: this can't see the entry hop's own real traffic, just what
+        tunnel_cache.db (shared across every ztrClient process on this
+        machine, unless db_name/SCRIPT_DIR differ) has recorded.
+        """
+        candidates = self.settings("services_ports")
+        if not isinstance(candidates, list) or not candidates:
+            raise ConfigFieldError("hop_settings.services_ports must be a non-empty list to auto-select a port")
+        usage = self.tunnel_cache.port_usage_counts(candidates)
+        least = min(usage.values())
+        least_used_ports = [p for p, count in usage.items() if count == least]
+        return random.choice(least_used_ports)
 
     def set_target_port(self,port: int):
         """ This is actually where the exit hop will connect to {TARGET_HOST}:{self.TARGET_PORT}"""
@@ -574,7 +641,7 @@ class RelayClient(RelayConfig):
             self.failed_hops.add(decrypted_msg['@sys_next_hop'])
 
         if decrypted_msg.get("status"):
-            self.tunnel_cache.set(self.tunnel_id,self.session_id,decrypted_msg, ttl_seconds=ttl)
+            self.tunnel_cache.set(self.tunnel_id,self.session_id,decrypted_msg, ttl_seconds=ttl, port=self.PORT)
 
         return decrypted_msg
 
