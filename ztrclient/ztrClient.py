@@ -91,12 +91,8 @@ class RelayConfig:
                     f"couldn't open {self.LOG_PATH}/ztrclient.log for writing — logging to stderr instead"
                 )
 
-        # Separate from ztrclient.log on purpose — a hop rejecting the
-        # authorization request (status: False) is the one failure mode a
-        # user has no other way to see (set_log() only prints when
-        # debug=True), so it gets its own always-on file a support agent
-        # can ask for directly, without wading through debug noise.
-        # propagate=False keeps it out of ztrclient.log's handler too.
+        # propagate=False keeps this out of ztrclient.log's handler too —
+        # it's meant to be its own separate file.
         self.ra_error_logger = logging.getLogger(f"{__name__}.ra_error")
         self.ra_error_logger.setLevel(logging.ERROR)
         self.ra_error_logger.propagate = False
@@ -214,11 +210,8 @@ def recv_exact(sock: socket.socket, length: int) -> bytes:
     return bytes(data)
 
 
-# Same module name as RelayConfig.logger (logging.getLogger(__name__) always
-# returns the same object for a given name), so this ends up in the same
-# ztrclient.log — as long as a RelayConfig/RelayClient exists first to attach
-# the handler. TunnelCache always does (RelayClient.__init__ creates it right
-# after super().__init__()), so this needs no setup of its own.
+# Same name as RelayConfig.logger, so this shares its handler — no setup
+# needed here as long as a RelayClient exists first (it always does).
 _cache_logger = logging.getLogger(__name__)
 
 
@@ -312,19 +305,9 @@ class TunnelCache:
             _cache_logger.warning(f"tunnel cache write failed for {tunnel_id[:8]}...: {e}")
 
     def port_usage_counts(self, candidate_ports: list) -> dict:
-        """
-        Count of currently-active (non-expired, cached) tunnels per port,
-        for each of candidate_ports — 0 for any with none. Local-only
-        signal: this machine's tunnel_cache.db (shared by every ztrClient
-        process using the same db_path, which is every one by default,
-        since it's SCRIPT_DIR-relative), not the entry hop's own real
-        traffic — used by RelayClient's automatic port selection (see
-        RelayClient.__init__) to spread new tunnels across
-        hop_settings.services_ports instead of always picking the first.
-        Falls back to reporting every candidate as equally free (all 0) on
-        a read failure, same reasoning as get()/set() — an unreadable
-        cache should never block port selection.
-        """
+        """Count of active cached tunnels per port in candidate_ports (0 for
+        none). Falls back to all-0 on a read failure — same as get()/set(),
+        an unreadable cache shouldn't block port selection."""
         now = time.time()
         counts = {p: 0 for p in candidate_ports}
         try:
@@ -354,20 +337,13 @@ class RelayClient(RelayConfig):
         super().__init__(config_file=config_file)
         self.tunnel_cache = TunnelCache()
         self.TARGET_HOST = target_host
-        # port=None auto-selects one of hop_settings.services_ports based on
-        # local usage — see _auto_select_port(). Needs self.tunnel_cache and
-        # RelayConfig's settings() (from super().__init__() above) already
-        # in place, which is why this can't move any earlier.
+        # Needs self.tunnel_cache and settings() (from super().__init__()
+        # above) already in place, so this can't move any earlier.
         if port is None:
             port = self._auto_select_port()
-        # PORT and TARGET_PORT are NOT the same thing, even though
-        # TARGET_PORT defaults to whatever PORT is passed in here. PORT is
-        # this tunnel's own listening_port, sent to the entry hop as part of
-        # the hop-authorization request (see request_hop_authorization()) —
-        # it identifies this session, it isn't where traffic ends up. The
-        # real destination is TARGET_HOST:TARGET_PORT — where the exit hop
-        # actually connects — and it can be changed independently at any
-        # time before authorization via set_target_port().
+        # PORT is this tunnel's own listening_port, not where traffic ends
+        # up — that's TARGET_HOST:TARGET_PORT, changeable independently via
+        # set_target_port().
         self.PORT = port
         self.TARGET_PORT = port # by default — override with set_target_port()
         self.DB_PATH = f"{self.SCRIPT_DIR}/{db_name}"
@@ -404,23 +380,15 @@ class RelayClient(RelayConfig):
         self.timing_defense = False
         self.secure_transport = False
         self.we_recipient_pubkey_path = None
-        # Deliberately never the same object as self.crypt (which signs/
-        # encrypts hop-authorization traffic with this client's own
-        # relay identity) — separation of duties: a target reached via
-        # with_encryption() should never need to know or trust this
-        # client's hop-facing keypair, only whatever keypair it was
-        # actually given here.
+        # Deliberately separate from self.crypt (hop-authorization identity)
+        # — a target reached via with_encryption() should only need to trust
+        # the keypair it was actually given, not this client's hop identity.
         self._e2e_crypt = None
 
     def _auto_select_port(self) -> int:
-        """
-        Picks a port from hop_settings.services_ports automatically, based on
-        how many currently-active (non-expired) tunnels this machine already
-        has open per port — least-used wins, random tiebreak. Local knowledge
-        only: this can't see the entry hop's own real traffic, just what
-        tunnel_cache.db (shared across every ztrClient process on this
-        machine, unless db_name/SCRIPT_DIR differ) has recorded.
-        """
+        """Picks the least-used port from hop_settings.services_ports (random
+        tiebreak), based on local tunnel_cache.db — not the entry hop's real
+        traffic, which this can't see."""
         candidates = self.settings("services_ports")
         if not isinstance(candidates, list) or not candidates:
             raise ConfigFieldError("hop_settings.services_ports must be a non-empty list to auto-select a port")
@@ -709,12 +677,8 @@ class RelayClient(RelayConfig):
         session_bytes = session_id.encode("utf-8")
 
         if self._e2e_crypt is not None:
-            # Set only if with_encryption() was given a recipient_pubkey_path
-            # — independent of self.secure_transport, which just flags the
-            # hop chain for its own unrelated final-leg encryption (see
-            # struct_payload()). self._e2e_crypt, never self.crypt — that's
-            # a completely different CryptBot instance used for hop
-            # authorization traffic; keeping them separate is the point.
+            # Only set if with_encryption() got a recipient_pubkey_path —
+            # unrelated to self.secure_transport (see struct_payload()).
             try:
                 payload = self._e2e_crypt.encrypt_sign_BytesPayload(payload)
             except Exception as e:
@@ -748,8 +712,6 @@ class RelayClient(RelayConfig):
             raise NetworkError(f"connection dropped while receiving data over the tunnel: {e}") from e
 
         if self._e2e_crypt is not None:
-            # Mirrors send_HTH's check — see with_encryption(). Independent
-            # of self.secure_transport, same reasoning as send_HTH above.
             try:
                 decrypted = self._e2e_crypt.decrypt_msg_verifyBytesPayload(payload, as_="bytes")
             except Exception as e:
