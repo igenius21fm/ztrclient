@@ -91,6 +91,31 @@ class RelayConfig:
                     f"couldn't open {self.LOG_PATH}/ztrclient.log for writing — logging to stderr instead"
                 )
 
+        # Separate from ztrclient.log on purpose — a hop rejecting the
+        # authorization request (status: False) is the one failure mode a
+        # user has no other way to see (set_log() only prints when
+        # debug=True), so it gets its own always-on file a support agent
+        # can ask for directly, without wading through debug noise.
+        # propagate=False keeps it out of ztrclient.log's handler too.
+        self.ra_error_logger = logging.getLogger(f"{__name__}.ra_error")
+        self.ra_error_logger.setLevel(logging.ERROR)
+        self.ra_error_logger.propagate = False
+        if not self.ra_error_logger.handlers:
+            ra_error_formatter = logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(message)s"
+            )
+            try:
+                ra_error_handler = logging.FileHandler(f"{self.LOG_PATH}/ztrclient_ra-error.log")
+                ra_error_handler.setFormatter(ra_error_formatter)
+                self.ra_error_logger.addHandler(ra_error_handler)
+            except OSError:
+                stream_handler = logging.StreamHandler()
+                stream_handler.setFormatter(ra_error_formatter)
+                self.ra_error_logger.addHandler(stream_handler)
+                self.logger.warning(
+                    f"couldn't open {self.LOG_PATH}/ztrclient_ra-error.log for writing — logging to stderr instead"
+                )
+
     def _load_config(self):
         try:
             with open(self.config_path, "r") as f:
@@ -635,6 +660,11 @@ class RelayClient(RelayConfig):
             return None
 
         self.set_log(f"HOP[{self.hops[0]}..] says {decrypted_msg.get('status')}")
+
+        if not decrypted_msg.get("status"):
+            self.ra_error_logger.error(
+                f"error_code={decrypted_msg.get('error_code')} error={decrypted_msg.get('error')}"
+            )
 
         if decrypted_msg.get("error_code") == 9: # HOP that failed
             decrypted_msg['@sys_next_hop'] = self.next_after(self.hops, decrypted_msg.get('hop_id'))
