@@ -24,9 +24,9 @@ but worth knowing what's actually in it:
 | `chain` | Every hop in order — entry, then each middle, then exit. Each entry has `address` (a real address for entry/exit, a `._ztr` alias for middle hops, since the client never learns a middle hop's real IP), `pubkey`, and `status`. |
 | `status` / `status_reason` | A snapshot of the route's health at the moment you downloaded this file — not live. Re-download from the dashboard to refresh it. |
 | `ra_port` | The port used to reach a hop for routing/control requests. Duplicated at `hop_settings.ra_port` below — `RelayConfig.ra_port` reads it from there specifically, via `settings("ra_port")`. |
-| `services` | Per-service settings, read via `RelayConfig.service(name)` — e.g. `services.ssh.port` and `services.ssh.local_proxy` (host/port). |
+| `services` | Per-service settings, read via `RelayConfig.service(name)` — e.g. `services.ssh.port` (see `hop_settings.services_ports` below) and `services.ssh.local_proxy` (host/port; not currently read anywhere in this client, unverified beyond its structure). |
 | `hop_settings.data_streams` | Framing for `send_HTH`/`recv_HTH` (`native.header_format`) and for raw streaming (`raw.max_size`). |
-| `hop_settings.services_ports` | Ports the relay's own plugin services use across the hop chain. |
+| `hop_settings.services_ports` | The set of ports the **entry hop** actually listens on for forwarding traffic — `ENTRY_HOP:7781`, `:7783`, or `:7784` all work. This is what `port` (the constructor arg to `RelayClient`, later used as `client.PORT`) needs to be one of: `send_HTH`/`recv_HTH` connect to `(client.entry_hop, client.PORT)`, so picking a port outside this list means nothing is listening there. `services.ssh.port` above is just which one this route's example config happens to default to. |
 | `hop_settings.encryptions.pubkey_id` | Which of your registered keys (dashboard's Keys panel) this route was created with. |
 | `hop_settings.pub_path_dir` | Local folder name `RelayConfig` caches each hop's public key PEM into, next to `ztrClient.py`. |
 
