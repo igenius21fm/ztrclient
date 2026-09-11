@@ -510,30 +510,22 @@ class RelayClient(RelayConfig):
         self.timing_defense = enabled
         return self
     
-    def with_encryption(self, recipient_pubkey_path: str = None, own_private_key: str = None, own_public_key: str = None, enabled: bool = True):
+    def with_encryption(self, recipient_pubkey_path: str, own_private_key: str = None, own_public_key: str = None):
         """
-        `enabled` alone (no recipient_pubkey_path) just sets secure_transport
-        — communicated to the hop chain so the exit hop also encrypts its
-        own final leg to target_host:target_port (see struct_payload()).
-        That's the whole original behavior, and every existing caller that
-        only wants this (ZtrRequestsClient, RCWorkers — they already run
-        their own separate end-to-end crypto layer) keeps working exactly
-        as before.
+        Makes send_HTH/recv_HTH sign+encrypt/decrypt+verify the payload
+        end-to-end against recipient_pubkey_path, using a dedicated keypair
+        — own_private_key/own_public_key if given, otherwise one generated
+        on first use (reused after that) at e2ePrivateKey.pem/
+        e2ePublicKey.pem next to this script. Deliberately never self.crypt's
+        own keypair (used for hop authorization) — keep this identity
+        separate, so a target only ever needs to trust the keypair you
+        actually hand it here, not this client's relay identity.
 
-        Passing `recipient_pubkey_path` additionally makes send_HTH/recv_HTH
-        themselves sign+encrypt/decrypt+verify the payload end-to-end
-        against it, using a dedicated keypair — own_private_key/
-        own_public_key if given, otherwise one generated on first use
-        (reused after that) at e2ePrivateKey.pem/e2ePublicKey.pem next to
-        this script. Deliberately never self.crypt's own keypair (used for
-        hop authorization) — keep this identity separate, so a target only
-        ever needs to trust the keypair you actually hand it here, not this
-        client's relay identity.
+        Also sets secure_transport, telling the hop chain the final leg to
+        target_host:target_port is already encrypted (see struct_payload())
+        — that signal only makes sense alongside real encryption, so there's
+        no way to set it without actually providing recipient_pubkey_path.
         """
-        self.secure_transport = enabled
-        if recipient_pubkey_path is None:
-            return self
-
         self.we_recipient_pubkey_path = recipient_pubkey_path
         try:
             self._e2e_crypt = CryptBot(
@@ -544,6 +536,7 @@ class RelayClient(RelayConfig):
             self._e2e_crypt.create_keys(rsa_size=2048, reuse=True)
         except Exception as e:
             raise CryptoError(f"couldn't set up end-to-end encryption keypair: {e}") from e
+        self.secure_transport = True
         return self
     
     def set_log(self, msg:str):
