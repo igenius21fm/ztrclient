@@ -26,6 +26,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ZTR_CLIENT_DIR = os.path.dirname(SCRIPT_DIR)
 DB_PATH = os.path.join(_ZTR_CLIENT_DIR, "tunnel_cache.db")
 RA_ERROR_LOG = os.path.join(_ZTR_CLIENT_DIR, "logs", "ztrclient_ra-error.log")
+STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
+_STATIC_CONTENT_TYPES = {".css": "text/css", ".js": "application/javascript"}
 
 DEFAULT_HOST_CANDIDATE = "10.10.15.10"
 FALLBACK_HOST = "127.0.0.1"
@@ -138,51 +140,17 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <title>ZTRelay client dashboard</title>
-<style>
-  :root {
-    --bg: #0f1417; --panel: #161d21; --border: #263038; --text: #dbe3e8;
-    --muted: #7c8992; --accent: #4fb3a9; --danger: #e0705f;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    padding: 32px;
-  }
-  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 18px 20px;
-  }
-  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  .card .value { font-size: 28px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; }
-  .card .value.ok { color: var(--accent); }
-  .card .value.off { color: var(--muted); font-size: 15px; font-weight: 400; }
-  section { margin-bottom: 28px; }
-  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
-  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  th, td { text-align: left; padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; }
-  tr:last-child td { border-bottom: none; }
-  td.mono, th.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-  .error-code { color: var(--danger); }
-  .empty { color: var(--muted); padding: 14px; text-align: center; }
-  .chain { display: flex; align-items: center; gap: 0; overflow-x: auto; padding: 8px 0; }
-  .hop {
-    flex: 0 0 auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    padding: 10px 16px; font-family: ui-monospace, monospace; font-size: 12px; text-align: center;
-  }
-  .hop .role { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; display: block; margin-bottom: 4px; }
-  .arrow { flex: 0 0 auto; color: var(--border); font-size: 18px; padding: 0 8px; transition: color .3s; }
-  .arrow.flowing { color: var(--accent); animation: pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
-</style>
+<link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
   <h1>ZTRelay client dashboard</h1>
   <div class="sub">This machine only — read-only view of tunnel_cache.db and ztrclient_ra-error.log.</div>
+
+  <div class="toolbar">
+    <button id="pause-btn">Pause</button>
+    <button id="refresh-btn">Refresh now</button>
+    <span id="last-updated"></span>
+  </div>
 
   <div class="grid">
     <div class="card">
@@ -201,98 +169,22 @@ PAGE = """<!doctype html>
   </section>
 
   <section>
-    <h2>Tunnels by port</h2>
+    <h2>Tunnels by port <span class="hint">click a row to filter live traffic below</span></h2>
     <table id="ports-table"><tbody></tbody></table>
   </section>
 
   <section>
     <h2>Recent hop-authorization errors</h2>
+    <input class="filter-input" id="error-filter" type="search" placeholder="Filter by code or message&hellip;">
     <table id="errors-table"><tbody></tbody></table>
   </section>
 
   <section id="traffic-section" style="display:none">
-    <h2>Live traffic to entry hop</h2>
+    <h2>Live traffic to entry hop <span class="hint" id="traffic-hint"></span></h2>
     <table id="traffic-table"><tbody></tbody></table>
   </section>
 
-<script>
-let lastPacketKey = null;
-let flowingUntil = 0;
-let lastData = null;
-
-function emptyRow(cols, text) {
-  return `<tr><td class="empty" colspan="${cols}">${text}</td></tr>`;
-}
-
-function render(data) {
-  document.getElementById("total-tunnels").textContent = data.tunnels.total;
-
-  const traffic = data.traffic;
-  const statusEl = document.getElementById("traffic-status");
-  if (traffic.enabled) {
-    statusEl.textContent = "Live";
-    statusEl.className = "value ok";
-  } else {
-    statusEl.textContent = traffic.reason || "off";
-    statusEl.className = "value off";
-  }
-
-  const ports = Object.entries(data.tunnels.by_port);
-  const portsBody = document.querySelector("#ports-table tbody");
-  portsBody.innerHTML = ports.length
-    ? ports.map(([p, c]) => `<tr><td class="mono">${p}</td><td>${c} active</td></tr>`).join("")
-    : emptyRow(2, "No active tunnels right now.");
-
-  const errorsBody = document.querySelector("#errors-table tbody");
-  errorsBody.innerHTML = data.ra_errors.length
-    ? data.ra_errors.map(e => `<tr><td class="mono">${e.time}</td><td class="error-code">${e.error_code}</td><td>${e.error}</td></tr>`).join("")
-    : emptyRow(3, "No hop rejections logged.");
-
-  const trafficSection = document.getElementById("traffic-section");
-  if (traffic.enabled || traffic.recent.length) {
-    trafficSection.style.display = "";
-    const trafficBody = document.querySelector("#traffic-table tbody");
-    trafficBody.innerHTML = traffic.recent.length
-      ? traffic.recent.map(p => `<tr><td class="mono">${p.time}</td><td class="mono">${p.src}</td><td class="mono">${p.dst}</td><td>${p.length} bytes</td></tr>`).join("")
-      : emptyRow(4, "Waiting for traffic...");
-  } else {
-    trafficSection.style.display = "none";
-  }
-
-  const chainSection = document.getElementById("chain-section");
-  if (data.chain && data.chain.length) {
-    chainSection.style.display = "";
-    const chainEl = document.getElementById("chain");
-    const roles = data.chain.map((h, i) => i === 0 ? "entry" : i === data.chain.length - 1 ? "exit" : "middle");
-
-    if (traffic.recent.length) {
-      const top = traffic.recent[0];
-      const key = `${top.time}|${top.src}|${top.dst}|${top.length}`;
-      if (key !== lastPacketKey) {
-        lastPacketKey = key;
-        flowingUntil = Date.now() + 4000;
-      }
-    }
-    const arrowClass = Date.now() < flowingUntil ? "arrow flowing" : "arrow";
-
-    chainEl.innerHTML = data.chain.map((h, i) =>
-      (i > 0 ? `<span class="${arrowClass}">&rarr;</span>` : '') +
-      `<div class="hop"><span class="role">${roles[i]}</span>${h.address}</div>`
-    ).join("");
-  } else {
-    chainSection.style.display = "none";
-  }
-}
-
-function poll() {
-  fetch("/api/data").then(r => r.json()).then(data => { lastData = data; render(data); }).catch(() => {});
-}
-poll();
-setInterval(poll, 3000);
-// Redraws with the last known data more often than we re-fetch, purely so
-// the chain's flow animation fades out on time instead of jumping every 3s.
-setInterval(() => { if (lastData) render(lastData); }, 500);
-</script>
+<script src="/static/dashboard.js"></script>
 </body>
 </html>
 """
@@ -322,8 +214,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "chain": _chain,
             }
             self._send(200, "application/json", json.dumps(data).encode("utf-8"))
+        elif self.path.startswith("/static/"):
+            self._serve_static(self.path[len("/static/"):])
         else:
             self._send(404, "text/plain", b"not found")
+
+    def _serve_static(self, name):
+        # basename() strips any directory component (including ../) — this
+        # only ever serves a file directly inside STATIC_DIR, never anything
+        # a crafted path could walk it out of.
+        ext = os.path.splitext(name)[1]
+        content_type = _STATIC_CONTENT_TYPES.get(ext)
+        path = os.path.join(STATIC_DIR, os.path.basename(name))
+        if not content_type or not os.path.isfile(path):
+            self._send(404, "text/plain", b"not found")
+            return
+        with open(path, "rb") as f:
+            self._send(200, content_type, f.read())
 
 
 def main():

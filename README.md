@@ -119,15 +119,16 @@ Only appears if `~/.local/bin` (or your `--prefix`) isn't already on your
 yourself — the exact lines it would have added are printed either way if
 you say no, so you can copy them in by hand later.
 
-**5. `Path to your downloaded .ztr route config:`**
-Only appears if the tunnel service is being set up (question 1 was `y`, or
-`--with-service` was passed) — the dashboard silently reuses this same
-config rather than asking again. Give it the path to a `.ztr` file you
-downloaded from a route in your dashboard — it gets copied into `routes/`
-and wired into the service unit.
-→ There's no sensible default here; if you don't have a route config yet,
-answer with a garbage/nonexistent path — the installer skips service setup
-cleanly and tells you to re-run with `--with-service` once you have one.
+**5. `Filename of your .ztr route config (already placed in routes/):`**
+Only appears if either service is being set up (question 1 or 2 was `y`, or
+`--with-service`/`--with-dashboard` was passed) — asked once regardless of
+which one (or both), since they point at the same route. `routes/` already
+exists by this point (created earlier in the run, before you're ever asked),
+so **move your downloaded `.ztr` file in there yourself first** — this wants
+a bare filename (`route.ztr`), not a path.
+→ If you don't have one there yet, answer with a nonexistent filename — the
+installer skips service setup cleanly and tells you to re-run with
+`--with-service`/`--with-dashboard` once the file's actually in `routes/`.
 
 ## Getting connected
 
@@ -292,7 +293,8 @@ and any `.ztr` configs in it are left alone.
   entry point itself.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_tunnel_lp.py` (the
   persistent tunnel service target), and `ztr_dashboard.py` (the local
-  tunnel/traffic dashboard).
+  tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
+  build step).
 - `utils/crypt_bot.py` — RSA/AES helper used for signing and encrypting
   messages to the relay.
 - `routes/` — where your downloaded `.ztr` route configs go (see

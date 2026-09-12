@@ -464,6 +464,21 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# One shared route config for both services — the tunnel service and the
+# dashboard point at the same route, so this is asked once regardless of
+# which one (or both) you're setting up. routes/ was already created above
+# (before wrappers were even installed), so there's always somewhere to put
+# the file before you're asked for it — this only ever wants a bare
+# filename, never a path, since ztrClient.py (RelayConfig) always resolves
+# --config-file inside routes/ itself.
+if [[ "$WITH_SERVICE" -eq 1 || "$WITH_DASHBOARD" -eq 1 ]]; then
+  read -r -p "Filename of your .ztr route config (already placed in routes/): " ZTR_CONFIG_NAME
+  if [[ -n "$ZTR_CONFIG_NAME" ]] && [[ ! -f "$SCRIPT_DIR/routes/$ZTR_CONFIG_NAME" ]]; then
+    log_err "no routes/$ZTR_CONFIG_NAME — place your downloaded .ztr file there, then re-run with --with-service/--with-dashboard."
+    ZTR_CONFIG_NAME=""
+  fi
+fi
+
 if [[ "$WITH_SERVICE" -eq 1 ]]; then
   log_info "setting up ztr_tunnel_lp.py as a systemd --user service ..."
 
@@ -475,39 +490,23 @@ if [[ "$WITH_SERVICE" -eq 1 ]]; then
     # systemd --user session/D-Bus reachable for this account. Common when
     # you su/sudo'd into this user instead of logging in as them directly,
     # or you're in a container/WSL setup where systemd --user never started
-    # for anyone. Caught here, before asking for a config path, rather than
-    # letting the raw dbus error below kill the script under `set -e`.
+    # for anyone.
     log_err "no systemd --user session available for this account (XDG_RUNTIME_DIR unset, or its D-Bus isn't reachable)."
     log_warn "if you reached this shell via su/sudo into this user: log in directly as them instead (SSH or"
     log_warn "console) and re-run. If you're already logged in directly: try 'loginctl enable-linger \$USER',"
     log_warn "then log out and back in. If systemd doesn't run here at all (containers, WSL without systemd"
     log_warn "enabled), --with-service can't work — run the tunnel yourself instead, in the foreground:"
     log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_tunnel_lp.py --config-file <name>.ztr --local-ip $LOCAL_IP"
+  elif [[ -z "$ZTR_CONFIG_NAME" ]]; then
+    log_err "no route config given — skipping service setup. Re-run with --with-service once routes/<name>.ztr is in place."
   else
-    read -r -p "Path to your downloaded .ztr route config: " ZTR_CONFIG_SRC
-    if [[ ! -f "$ZTR_CONFIG_SRC" ]]; then
-      log_err "no file at $ZTR_CONFIG_SRC — skipping service setup. Re-run with --with-service once it's in place."
-    else
-      # ztrClient.py (RelayConfig) always resolves --config-file inside
-      # routes/, next to itself — never a path you hand it directly. Copy
-      # whatever you pointed at in there under its own name, so every .ztr
-      # config ends up in one place regardless of where it was downloaded to.
-      mkdir -p "$SCRIPT_DIR/routes"
-      ZTR_CONFIG_NAME="$(basename "$ZTR_CONFIG_SRC")"
-      ZTR_CONFIG_DEST="$SCRIPT_DIR/routes/$ZTR_CONFIG_NAME"
-      ZTR_CONFIG_SRC_ABS="$(cd "$(dirname "$ZTR_CONFIG_SRC")" && pwd)/$ZTR_CONFIG_NAME"
-      if [[ "$ZTR_CONFIG_SRC_ABS" != "$ZTR_CONFIG_DEST" ]]; then
-        cp "$ZTR_CONFIG_SRC" "$ZTR_CONFIG_DEST"
-        log_ok "copied to $ZTR_CONFIG_DEST"
-      fi
+    if ! local_ip_present; then
+      log_warn "$LOCAL_IP isn't configured on this machine yet — sessions will fail to bind until you"
+      log_warn "run './installer-linux.sh --with-local-ip' (or restart the service with --local-ip 127.0.0.1)."
+    fi
 
-      if ! local_ip_present; then
-        log_warn "$LOCAL_IP isn't configured on this machine yet — sessions will fail to bind until you"
-        log_warn "run './installer-linux.sh --with-local-ip' (or restart the service with --local-ip 127.0.0.1)."
-      fi
-
-      mkdir -p "$(dirname "$SERVICE_UNIT")"
-      cat > "$SERVICE_UNIT" <<EOF
+    mkdir -p "$(dirname "$SERVICE_UNIT")"
+    cat > "$SERVICE_UNIT" <<EOF
 [Unit]
 Description=ZTRelay Tunnel local proxy
 After=network-online.target
@@ -521,12 +520,11 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 EOF
-      systemctl --user daemon-reload
-      systemctl --user enable --now ztr-tunnel-lp.service
-      log_ok "service installed and started: ztr-tunnel-lp.service"
-      echo "${C_DIM}    systemctl --user status ztr-tunnel-lp.service${C_RESET}"
-      echo "${C_DIM}    journalctl --user -u ztr-tunnel-lp.service -f${C_RESET}"
-    fi
+    systemctl --user daemon-reload
+    systemctl --user enable --now ztr-tunnel-lp.service
+    log_ok "service installed and started: ztr-tunnel-lp.service"
+    echo "${C_DIM}    systemctl --user status ztr-tunnel-lp.service${C_RESET}"
+    echo "${C_DIM}    journalctl --user -u ztr-tunnel-lp.service -f${C_RESET}"
   fi
 fi
 
@@ -546,38 +544,11 @@ if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
     log_warn "enabled), --with-dashboard can't work — run it yourself instead, in the foreground:"
     log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_dashboard.py"
   else
-    # The tunnel service's config, if this run also set one up, IS this
-    # route's config — reuse it silently rather than asking again for the
-    # same path. Only prompt when there's genuinely nothing to reuse.
-    if [[ -n "${ZTR_CONFIG_NAME:-}" ]]; then
-      ZTR_DASHBOARD_CONFIG_SRC="$ZTR_CONFIG_NAME"
-      log_info "using the same route config as the tunnel service: $ZTR_CONFIG_NAME"
-    else
-      read -r -p "Path to a .ztr route config for the dashboard to diagram (blank for none): " ZTR_DASHBOARD_CONFIG_SRC
-    fi
-
+    # Same $ZTR_CONFIG_NAME as the tunnel service above — one route config,
+    # asked once, shared by both.
     DASHBOARD_EXEC="plugins/ztr_dashboard.py"
-    if [[ -n "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
-      # Same as --with-service above: whatever it points at ends up as its
-      # own file directly inside routes/, since that's the only place
-      # ztrClient.py (RelayConfig) will ever look for it.
-      if [[ -f "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
-        mkdir -p "$SCRIPT_DIR/routes"
-        ZTR_DASHBOARD_CONFIG_NAME="$(basename "$ZTR_DASHBOARD_CONFIG_SRC")"
-        ZTR_DASHBOARD_CONFIG_DEST="$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_NAME"
-        ZTR_DASHBOARD_CONFIG_SRC_ABS="$(cd "$(dirname "$ZTR_DASHBOARD_CONFIG_SRC")" && pwd)/$ZTR_DASHBOARD_CONFIG_NAME"
-        if [[ "$ZTR_DASHBOARD_CONFIG_SRC_ABS" != "$ZTR_DASHBOARD_CONFIG_DEST" ]]; then
-          cp "$ZTR_DASHBOARD_CONFIG_SRC" "$ZTR_DASHBOARD_CONFIG_DEST"
-          log_ok "copied to $ZTR_DASHBOARD_CONFIG_DEST"
-        fi
-        DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_NAME"
-      elif [[ -f "$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
-        # Already just a name sitting in routes/ (e.g. reused from
-        # --with-service above, which already copied it there).
-        DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_SRC"
-      else
-        log_warn "no file at $ZTR_DASHBOARD_CONFIG_SRC — starting the dashboard without a config (tunnel/error panels only)."
-      fi
+    if [[ -n "$ZTR_CONFIG_NAME" ]]; then
+      DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_CONFIG_NAME"
     fi
 
     # The dashboard has its own runtime fallback (127.0.0.1) when the dummy
