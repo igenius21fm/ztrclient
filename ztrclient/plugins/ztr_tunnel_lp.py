@@ -9,9 +9,9 @@ import time
 # ztrClient.py lives one directory up (package root), not next to this
 # file — plain `from ztrClient import ...` only resolves by accident of
 # CWD, and fails with ModuleNotFoundError when this is run the way the
-# docs and installer-linux.sh/installer-macos.sh's service unit actually
-# invoke it (`python3 plugins/ztr_tunnel_lp.py`, which puts plugins/ on
-# sys.path, not its parent).
+# docs and installer-linux.sh's service unit actually invoke it
+# (`python3 plugins/ztr_tunnel_lp.py`, which puts plugins/ on sys.path,
+# not its parent).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ztrClient import RelayClient, RelayConfig
 
@@ -23,9 +23,9 @@ from ztrClient import RelayClient, RelayConfig
 
     One persistent process per route (.ztr config is fixed for the whole
     lifetime of the service — edit the file and restart to point it at a
-    different route). Run it standalone, or as a systemd/launchd service
-    (installer-linux.sh/installer-macos.sh --with-service sets the latter
-    up for you). Either way it needs pycryptodome, which is why the
+    different route). Run it standalone, or as a systemd service
+    (installer-linux.sh --with-service sets the latter up for you).
+    Either way it needs pycryptodome, which is why the
     installers create a dedicated venv for it instead of relying on
     whatever's on the system python3:
 
@@ -57,8 +57,7 @@ from ztrClient import RelayClient, RelayConfig
 
     Per-session listeners bind to --local-ip (default 10.10.15.10), a
     dedicated address instead of the generic 127.0.0.1 — set it up once
-    with installer-linux.sh/installer-macos.sh --with-local-ip. Every
-    wrapper reads local_ip back
+    with installer-linux.sh --with-local-ip. Every wrapper reads local_ip back
     from the START response rather than assuming a hardcoded default, so
     the service's actual bind address is always the single source of
     truth. Falls back to 127.0.0.1 with --local-ip 127.0.0.1 if you'd
@@ -115,9 +114,8 @@ class TunnelProxyServer:
         # Per-session data-plane listeners bind here, not the control
         # server — a dedicated address so tunneled traffic is visually
         # distinct from ordinary 127.0.0.1 localhost traffic (netstat, ps,
-        # logs). Must already exist on some interface (installer-linux.sh/
-        # installer-macos.sh --with-local-ip sets it up as a loopback alias)
-        # or asyncio's
+        # logs). Must already exist on some interface (installer-linux.sh
+        # --with-local-ip sets it up as a dummy interface) or asyncio's
         # start_server below fails with "Cannot assign requested address".
         self.local_ip = local_ip
         self.idle_timeout = idle_timeout
@@ -245,7 +243,7 @@ class TunnelProxyServer:
             server = await asyncio.start_server(handler, self.local_ip, 0)
         except OSError as e:
             print(f"[-] Failed to bind {self.local_ip}: {e}")
-            print(f"[-] Run installer-linux.sh/installer-macos.sh --with-local-ip to set up {self.local_ip} as a loopback alias, "
+            print(f"[-] Run installer-linux.sh --with-local-ip to set up {self.local_ip} as a dummy interface, "
                   f"or restart this service with --local-ip 127.0.0.1 to skip the dedicated address entirely.")
             return {"status": False, "error": f"failed to bind {self.local_ip}: {e}"}
         local_port = server.sockets[0].getsockname()[1]
@@ -366,7 +364,7 @@ def _build_arg_parser():
         "--local-ip",
         default="10.10.15.10",
         help="Bind address for per-session data-plane listeners (default: 10.10.15.10, a dedicated "
-        "loopback alias set up by installer-linux.sh/installer-macos.sh --with-local-ip). Pass 127.0.0.1 to skip the dedicated "
+        "dummy interface set up by installer-linux.sh --with-local-ip). Pass 127.0.0.1 to skip the dedicated "
         "address and use plain localhost instead.",
     )
     parser.add_argument(

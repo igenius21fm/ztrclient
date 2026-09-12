@@ -20,8 +20,8 @@
 # command line, only once the tunnel is actually up. Double-quoting them
 # (or leaving out bash -c) would expand them to empty before this script
 # ever runs. $ZTR_LOCAL_IP is whatever ztr_tunnel_lp.py is actually bound
-# to (default 10.10.15.10, a dedicated address — see installer-linux.sh /
-# installer-macos.sh's --with-local-ip — not always 127.0.0.1), so don't hardcode 127.0.0.1 in
+# to (default 10.10.15.10, a dedicated address — see installer-linux.sh's
+# --with-local-ip — not always 127.0.0.1), so don't hardcode 127.0.0.1 in
 # the wrapped command; use the env var.
 #
 # Requires ztr_tunnel_lp.py already running as a service — this script only

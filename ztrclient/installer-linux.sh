@@ -3,9 +3,7 @@
 # ztr_pg) so they run from anywhere, without a manual shell alias per
 # docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
 # ztrClient.py itself — this is scoped to plugins/ only (which is also
-# where ztr_tunnel_lp.py and ztr_dashboard.py live).
-# On macOS? Use installer-macos.sh instead — this one assumes systemd
-# and `ip addr`, neither of which exist there.
+# where ztr_tunnel_lp.py and ztr_dashboard.py live). Linux/systemd only.
 #
 #   ./installer-linux.sh                       install wrappers into ~/.local/bin
 #   ./installer-linux.sh --prefix DIR          install into DIR instead
@@ -82,7 +80,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -310,7 +308,11 @@ if [[ -x "$VENV_PY" ]]; then
 else
   log_info "creating ztr's venv at $VENV_DIR ..."
   mkdir -p "$(dirname "$VENV_DIR")"
-  if ! python3 -m venv "$VENV_DIR"; then
+  # --copies, not the default symlink-to-system-python3 — matters for
+  # --with-dashboard's setcap below: capabilities follow the real file, so
+  # setcap-ing a symlink would actually grant raw-socket capture to the
+  # shared system python3, not just this venv's own interpreter.
+  if ! python3 -m venv --copies "$VENV_DIR"; then
     log_err "couldn't create the venv — on Debian/Ubuntu you likely need: sudo apt install python3-venv"
     exit 1
   fi
@@ -330,10 +332,29 @@ fi
 if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
   if "$VENV_PY" -c "import scapy" >/dev/null 2>&1; then
     log_ok "scapy already installed in the venv."
+    SCAPY_READY=1
   elif "$VENV_PY" -m pip install --quiet scapy; then
-    log_ok "scapy installed — live traffic capture available (needs root or equivalent raw-socket privileges to actually run)."
+    log_ok "scapy installed."
+    SCAPY_READY=1
   else
     log_warn "couldn't install scapy — the dashboard's live traffic panel will stay off, everything else still works."
+    SCAPY_READY=0
+  fi
+
+  # Actually make live capture work, not just possible — a systemd --user
+  # service has no raw-socket privileges by default, and running the whole
+  # dashboard as root for one panel is more than this needs. cap_net_raw
+  # grants just that, to this venv's interpreter specifically (same
+  # mechanism dumpcap/Wireshark use to avoid running fully as root).
+  if [[ "$SCAPY_READY" -eq 1 ]]; then
+    if ! command -v setcap >/dev/null 2>&1; then
+      log_warn "setcap not found (Debian/Ubuntu: sudo apt install libcap2-bin) — live traffic capture needs"
+      log_warn "either that or running ztr-dashboard.service as root; everything else still works without it."
+    elif sudo setcap cap_net_raw,cap_net_admin=eip "$VENV_PY"; then
+      log_ok "granted $VENV_PY raw-socket capture capability — live traffic will work without running as root."
+    else
+      log_warn "couldn't grant capture capability to $VENV_PY — live traffic capture will stay off."
+    fi
   fi
 fi
 
@@ -447,7 +468,7 @@ if [[ "$WITH_SERVICE" -eq 1 ]]; then
   log_info "setting up ztr_tunnel_lp.py as a systemd --user service ..."
 
   if ! command -v systemctl >/dev/null 2>&1; then
-    log_err "systemctl not found — this installer is Linux/systemd-specific. On macOS, use installer-macos.sh instead."
+    log_err "systemctl not found — this installer is Linux/systemd-specific."
     log_warn "run it standalone instead: $VENV_PY $SCRIPT_DIR/plugins/ztr_tunnel_lp.py --config-file route.ztr"
   elif [[ -z "${XDG_RUNTIME_DIR:-}" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
     # "Failed to connect to user scope bus via local transport ..." — no
@@ -514,7 +535,7 @@ if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
   log_info "setting up ztr_dashboard.py as a systemd --user service ..."
 
   if ! command -v systemctl >/dev/null 2>&1; then
-    log_err "systemctl not found — this installer is Linux/systemd-specific. On macOS, use installer-macos.sh instead."
+    log_err "systemctl not found — this installer is Linux/systemd-specific."
     log_warn "run it standalone instead: $VENV_PY $SCRIPT_DIR/plugins/ztr_dashboard.py --config-file route.ztr"
   elif [[ -z "${XDG_RUNTIME_DIR:-}" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
     # Same "no systemd --user session" case as --with-service above.
@@ -525,15 +546,14 @@ if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
     log_warn "enabled), --with-dashboard can't work — run it yourself instead, in the foreground:"
     log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_dashboard.py"
   else
-    # The tunnel service's config, if this run also set one up, works just
-    # as well for the dashboard (same route) — offer it as the default
-    # instead of asking you to type the same path twice.
-    DASHBOARD_CONFIG_PROMPT="Path to a .ztr route config for the dashboard to diagram (blank for none)"
+    # The tunnel service's config, if this run also set one up, IS this
+    # route's config — reuse it silently rather than asking again for the
+    # same path. Only prompt when there's genuinely nothing to reuse.
     if [[ -n "${ZTR_CONFIG_NAME:-}" ]]; then
-      read -r -p "$DASHBOARD_CONFIG_PROMPT [$ZTR_CONFIG_NAME]: " ZTR_DASHBOARD_CONFIG_SRC
-      ZTR_DASHBOARD_CONFIG_SRC="${ZTR_DASHBOARD_CONFIG_SRC:-$ZTR_CONFIG_NAME}"
+      ZTR_DASHBOARD_CONFIG_SRC="$ZTR_CONFIG_NAME"
+      log_info "using the same route config as the tunnel service: $ZTR_CONFIG_NAME"
     else
-      read -r -p "$DASHBOARD_CONFIG_PROMPT: " ZTR_DASHBOARD_CONFIG_SRC
+      read -r -p "Path to a .ztr route config for the dashboard to diagram (blank for none): " ZTR_DASHBOARD_CONFIG_SRC
     fi
 
     DASHBOARD_EXEC="plugins/ztr_dashboard.py"
@@ -552,12 +572,20 @@ if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
         fi
         DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_NAME"
       elif [[ -f "$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
-        # Already just a name already sitting in routes/ (e.g. reused from
+        # Already just a name sitting in routes/ (e.g. reused from
         # --with-service above, which already copied it there).
         DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_SRC"
       else
         log_warn "no file at $ZTR_DASHBOARD_CONFIG_SRC — starting the dashboard without a config (tunnel/error panels only)."
       fi
+    fi
+
+    # The dashboard has its own runtime fallback (127.0.0.1) when the dummy
+    # IP isn't around, but if this invocation is actually setting it up
+    # (or it's already there), tell the dashboard explicitly instead of
+    # leaving it to guess — one dedicated address, shared by both services.
+    if [[ "$WITH_LOCAL_IP" -eq 1 ]]; then
+      DASHBOARD_EXEC="$DASHBOARD_EXEC --host $LOCAL_IP"
     fi
 
     mkdir -p "$(dirname "$DASHBOARD_SERVICE_UNIT")"
@@ -580,8 +608,6 @@ EOF
     log_ok "service installed and started: ztr-dashboard.service"
     echo "${C_DIM}    systemctl --user status ztr-dashboard.service${C_RESET}"
     echo "${C_DIM}    journalctl --user -u ztr-dashboard.service -f${C_RESET}"
-    log_warn "live traffic capture (if scapy is installed) still needs this service run as root to actually"
-    log_warn "capture packets — systemd --user services don't have raw-socket privileges on their own."
   fi
 fi
 
