@@ -176,6 +176,23 @@ tr.port-row.selected td:first-child { color: var(--accent); }
 }
 .btn-check-mil:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ---- target node (end of chain, not part of the route) ---- */
+.hop.hop-target { cursor: default; border-style: dashed; color: var(--muted); }
+.hop.hop-target:hover { background: none; border-color: var(--border); }
+.hop.hop-target .icon { width: 11px; height: 11px; vertical-align: -1px; }
+
+/* ---- tools offcanvas ---- */
+.offcanvas { background: var(--panel); border-left: 1px solid var(--accent-dim); color: var(--text); width: 380px; }
+.offcanvas-header { border-bottom: 1px solid var(--border); }
+.offcanvas-title { text-transform: uppercase; letter-spacing: .08em; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.tool-block h6 { display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: .06em; font-size: 12px; color: var(--text); font-weight: 700; }
+.tool-block h6 .icon { color: var(--accent); }
+.tool-block .hint { display: block; margin: 4px 0 10px; }
+.offcanvas hr { border-color: var(--border); opacity: 1; margin: 20px 0; }
+.form-check-input { background-color: var(--panel-2); border-color: var(--border); }
+.form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
+.form-check-label { font-size: 12.5px; color: var(--muted); }
+
 @media (max-width: 991px) {
   .term-col { position: static; }
 }

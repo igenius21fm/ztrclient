@@ -22,16 +22,15 @@ $(function () {
     return `<tr><td class="empty" colspan="${cols}">${text}</td></tr>`;
   }
 
-  // Every captured packet has the entry hop on one side — the other side
-  // is this machine itself, under whatever local port the tunnel used.
-  // Naming it [YOU] instead of a bare loopback/local IP is just easier to
-  // scan than remembering which address is "us" in a feed of addresses.
+  // Every captured packet has the entry hop on one side, this machine on
+  // the other — [ENTRY]/[YOU] read faster than remembering which raw
+  // IP:port is which in a scrolling feed of addresses.
   function labelEndpoint(hostport, entryAddress) {
     if (!entryAddress) return hostport;
     const i = hostport.lastIndexOf(":");
     const host = hostport.slice(0, i);
     const port = hostport.slice(i + 1);
-    return host === entryAddress ? hostport : `[YOU]:${port}`;
+    return host === entryAddress ? `[ENTRY]:${port}` : `[YOU]:${port}`;
   }
 
   function mask(value) {
@@ -41,11 +40,12 @@ $(function () {
 
   function renderCreds(data) {
     const route = data.route;
-    if (!route || (!route.identifier && !route.secret_key)) {
+    if (!route || (!route.identifier && !route.secret_key && !route.route_id)) {
       $("#creds-section").hide();
       return;
     }
     $("#creds-section").show();
+    $("#creds-route_id").text(route.route_id || "—");
     ["identifier", "secret_key"].forEach(field => {
       const val = route[field];
       const $el = $(`#creds-${field}`);
@@ -154,13 +154,19 @@ $(function () {
       }
       const arrowClass = Date.now() < flowingUntil ? "arrow flowing" : "arrow";
 
-      $("#chain").html(data.chain.map((h, i) => {
+      const hopsHtml = data.chain.map((h, i) => {
         const statusClass = h.status === "up" ? "up" : (h.status ? "down" : "");
         return (i > 0 ? `<span class="${arrowClass}">&rarr;</span>` : '') +
           `<div class="hop" data-index="${i}"><span class="role">${roles[i]}<span class="hop-status ${statusClass}"></span></span>${h.address}</div>`;
-      }).join(""));
+      }).join("");
+      // The exit hop dials somewhere that isn't part of this route at all —
+      // shown, not clickable, just so the diagram doesn't read as if the
+      // chain ends the traffic instead of forwarding it on.
+      const targetHtml = `<span class="${arrowClass}">&rarr;</span>` +
+        `<div class="hop hop-target"><span class="role"><svg class="icon"><use href="#icon-target"></use></svg> target</span>(anywhere)</div>`;
+      $("#chain").html(hopsHtml + targetHtml);
 
-      $("#chain .hop").on("click", function () {
+      $("#chain .hop[data-index]").on("click", function () {
         showHopDetail(data.chain[$(this).data("index")], roles[$(this).data("index")]);
       });
     } else {
@@ -222,6 +228,66 @@ $(function () {
     if ($(e.target).is("input, textarea")) return;
     if (e.key === "p" || e.key === "P") setPaused(!paused);
     if (e.key === "r" || e.key === "R") poll();
+  });
+
+  function postJSON(url, payload) {
+    return $.ajax({ url, method: "POST", contentType: "application/json", data: JSON.stringify(payload || {}) });
+  }
+
+  $("#sign-nonce-btn").on("click", () => {
+    const nonce = $("#sign-nonce-input").val().trim();
+    $("#sign-error").hide();
+    $("#sign-result").hide();
+    if (!nonce) { $("#sign-error").text("Paste a nonce first.").show(); return; }
+    postJSON("/api/sign", { nonce })
+      .done(res => {
+        if (res.ok) {
+          $("#sign-pubkey").text(res.public_key);
+          $("#sign-signature").text(res.signature_hex);
+          $("#sign-result").show();
+        } else {
+          $("#sign-error").text(res.error).show();
+        }
+      })
+      .fail(() => $("#sign-error").text("Request failed.").show());
+  });
+
+  function loadTunnelsList() {
+    $.getJSON("/api/tunnels").done(rows => {
+      $("#tunnels-table tbody").html(rows.length
+        ? rows.map(t => `<tr><td class="mono">${t.tunnel_id.slice(0, 12)}&hellip;</td><td class="mono">${t.port ?? "&mdash;"}</td><td>${Math.max(0, Math.round(t.expires_in))}s</td></tr>`).join("")
+        : emptyRow(3, "No active tunnels."));
+    });
+  }
+  $("#tunnels-refresh-btn").on("click", loadTunnelsList);
+  $("#tunnels-reset-btn").on("click", () => {
+    if (!window.confirm("Reset tunnel_cache.db? Every cached tunnel re-authorizes on its next request.")) return;
+    postJSON("/api/tunnels/reset").done(loadTunnelsList);
+  });
+  $("#tools-menu").on("show.bs.offcanvas", loadTunnelsList);
+
+  $("#ping-with-encryption").on("change", function () {
+    $("#ping-pubkey-path").toggle(this.checked);
+  });
+
+  $("#ping-send-btn").on("click", () => {
+    const $result = $("#ping-result");
+    const targetHost = $("#ping-target-host").val().trim();
+    if (!targetHost) { $result.html('<div class="error-code">target host is required</div>'); return; }
+    $result.html('<span class="hint">sending&hellip;</span>');
+    postJSON("/api/ping", {
+      target_host: targetHost,
+      target_port: $("#ping-target-port").val() || null,
+      with_encryption: $("#ping-with-encryption").is(":checked"),
+      recipient_pubkey_path: $("#ping-pubkey-path").val(),
+      with_timing_defense: $("#ping-with-timing-defense").is(":checked"),
+    })
+      .done(res => {
+        $result.html(res.ok
+          ? `<div class="pubkey-box">${escapeHtml(res.response)}</div><p class="hint mt-1 mb-0">${res.elapsed_ms}ms &middot; port ${res.port}</p>`
+          : `<div class="error-code">${escapeHtml(res.error)}</div>`);
+      })
+      .fail(() => $result.html('<div class="error-code">request failed</div>'));
   });
 
   poll();
