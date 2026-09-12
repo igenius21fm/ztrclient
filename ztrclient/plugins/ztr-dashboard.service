@@ -1,0 +1,24 @@
+# systemd --user unit template for ztr_dashboard.py — same pattern as
+# ztrclient's own ztr-tunnel-lp.service (see installer-linux.sh --with-service).
+# Fill in the two paths below, then:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp ztr-dashboard.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ztr-dashboard.service
+#
+# Live traffic capture (scapy) needs raw-socket privileges this --user
+# service won't have — the tunnel/error panels still work without it.
+
+[Unit]
+Description=ZTRelay client dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/ztrclient
+ExecStart=/path/to/ztrclient-venv/bin/python3 plugins/ztr_dashboard.py --config-file your-route.ztr
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
