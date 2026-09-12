@@ -258,7 +258,7 @@ def run_ping(target_host, target_port=None, with_encryption=False, recipient_pub
     try:
         with socket.create_connection((client.entry_hop, client.PORT), timeout=10) as sock:
             client.send_HTH(sock, b"PING", client.session_id)
-            response, resp_session_id = client.recv_HTH(sock)
+            response, _session_id = client.recv_HTH(sock)
     except Exception as e:
         return {"ok": False, "error": f"PING failed: {e}"}
 
@@ -272,11 +272,6 @@ def run_ping(target_host, target_port=None, with_encryption=False, recipient_pub
         "elapsed_ms": round((time.time() - started) * 1000, 1),
         "session_id": client.session_id,
         "port": client.PORT,
-        # The exit hop marks a payload it relayed straight from the target
-        # (rather than one it generated itself) by zeroing out the session
-        # field instead of stamping a real session id — this is that check,
-        # confirming the PING really reached the target and back.
-        "from_target": resp_session_id == "0" * 64,
     }
 
 
