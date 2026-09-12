@@ -149,11 +149,10 @@ tr.port-row.selected td:first-child { color: var(--accent); }
   padding: 12px 14px; height: 420px; overflow-y: auto; position: relative;
   background-image: repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0px, rgba(255,255,255,.015) 1px, transparent 1px, transparent 3px);
 }
-.term-line { white-space: pre-wrap; word-break: break-all; margin-bottom: 2px; animation: term-in .15s ease-out; }
+.term-line { white-space: pre-wrap; word-break: break-all; margin-bottom: 2px; }
 .term-line .t { color: var(--muted); }
 .term-line .arrow-in { color: var(--accent); }
 .term-line .arrow-out { color: var(--amber); }
-@keyframes term-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
 .term-cursor {
   display: inline-block; width: 7px; height: 13px; background: var(--term-text);
   opacity: .8; vertical-align: text-bottom;
