@@ -284,7 +284,7 @@ $(function () {
     })
       .done(res => {
         $result.html(res.ok
-          ? `<div class="pubkey-box">${escapeHtml(res.response)}</div><p class="hint mt-1 mb-0">${res.elapsed_ms}ms &middot; port ${res.port}</p>`
+          ? `<div class="pubkey-box">${escapeHtml(res.response)}</div><p class="hint mt-1 mb-0">${res.elapsed_ms}ms &middot; port ${res.port} &middot; ${res.from_target ? "confirmed from target" : "source unconfirmed"}</p>`
           : `<div class="error-code">${escapeHtml(res.error)}</div>`);
       })
       .fail(() => $result.html('<div class="error-code">request failed</div>'));
