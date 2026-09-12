@@ -12,8 +12,7 @@ ZTRelay platform (Downloads page → "Read the docs").
 ## Requirements
 
 - Python 3.8+
-- **Linux** (systemd) or **macOS** — the installers are OS-specific; there's
-  no Windows installer yet.
+- **Linux** (systemd) — the installer is Linux-specific for now.
 - No manual `pip install` — the installer sets up its own isolated venv.
 
 ## Install
@@ -34,19 +33,15 @@ unzip ztrclient-v1.0.2.zip
 cd ztrclient
 ```
 
-Then run the installer for your OS:
+Then run the installer:
 
 ```bash
-# Linux
 ./installer-linux.sh
-
-# macOS
-./installer-macos.sh
 ```
 
-Both installers, with no flags, walk you through everything interactively
-(see [Installer prompts](#installer-prompts) below) — no flags are required
-for a normal install. Under the hood, each one:
+With no flags, it walks you through everything interactively (see
+[Installer prompts](#installer-prompts) below) — no flags are required for a
+normal install. Under the hood, it:
 
 1. Makes `plugins/{ztr_ssh,ztr_forward,ztr_pg}` executable — a zip download
    or fresh `git clone` doesn't reliably preserve the executable bit.
@@ -56,9 +51,11 @@ for a normal install. Under the hood, each one:
    download has to live there.
 4. Symlinks the three wrappers into `~/.local/bin` (or `--prefix`), and
    optionally adds that to your `PATH` plus shell aliases.
-5. Optionally sets up a persistent background service (systemd `--user` on
-   Linux, a launchd agent on macOS) for `ztr_tunnel_lp.py`, and a dedicated
-   IP for its tunneled sessions to bind to.
+5. Optionally sets up `ztr_tunnel_lp.py` as a persistent `systemd --user`
+   service, and a dedicated IP for its tunneled sessions to bind to.
+6. Optionally sets up `ztr_dashboard.py` (a local, read-only tunnel/traffic
+   dashboard) the same way, reusing the same `.ztr` config and dedicated IP
+   if you set both up together.
 
 ### Flags
 
@@ -70,25 +67,25 @@ installs, where the interactive prompts are skipped automatically anyway
 |---|---|
 | `--prefix DIR` | Install the wrappers into `DIR` instead of `~/.local/bin`. |
 | `--venv-dir DIR` | Put the venv at `DIR` instead of `~/.local/share/ztr/venv`. |
-| `--with-service` | Set up the persistent background service non-interactively (implies `--with-local-ip`). |
+| `--with-service` | Set up the tunnel service non-interactively (implies `--with-local-ip`). |
+| `--with-dashboard` | Set up the dashboard service non-interactively. |
 | `--with-local-ip` | Set up the dedicated dummy IP non-interactively. |
 | `--local-ip IP` | Use `IP` instead of the default `10.10.15.10`. |
-| `--uninstall` | Remove everything the installer set up — wrappers, venv, service, PATH/alias lines, dummy IP. |
+| `--uninstall` | Remove everything the installer set up — wrappers, venv, both services, PATH/alias lines, dummy IP. |
 | `-h`, `--help` | Print the full usage text. |
 
 ```bash
-# fully non-interactive install, custom prefix, service + custom IP
-./installer-linux.sh --with-service --local-ip 10.10.15.20 --prefix "$HOME/bin"
+# fully non-interactive install, custom prefix, both services + custom IP
+./installer-linux.sh --with-service --with-dashboard --local-ip 10.10.15.20 --prefix "$HOME/bin"
 ```
 
 ## Installer prompts
 
-Run with no flags in a real terminal, you'll be asked up to four questions —
+Run with no flags in a real terminal, you'll be asked up to five questions —
 each one only appears if it's actually relevant to your setup, so you may
-see fewer than four.
+see fewer than five.
 
 **1. `Set up ztr_tunnel_lp.py as a persistent systemd --user service? [y/N]:`**
-*(macOS: "...as a persistent launchd agent?")*
 Always asked first, unless you already passed `--with-service` (or you're
 running `--uninstall`, or non-interactively). This sets up a background
 service that keeps a tunnel alive across reboots/logins, instead of you
@@ -98,14 +95,23 @@ running `ztr_tunnel_lp.py` yourself in a terminal each time.
 → **Answer `y`** if you want a long-running local proxy for tunneled
 sessions to bind to, always on in the background.
 
-**2. `Dummy IP for tunneled sessions to bind to [10.10.15.10]:`**
-Only appears if you answered `y` above (or passed `--with-local-ip`). This
-sets up a real dedicated network interface (not just a loopback alias) that
-`ztr_tunnel_lp.py`'s listeners bind to, instead of the generic `127.0.0.1`.
+**2. `Set up ztr_dashboard.py as a persistent systemd --user service? [y/N]:`**
+Asked separately from question 1 — the dashboard doesn't need the tunnel
+service, or vice versa. Sets up a local, read-only web page showing this
+machine's active tunnels and hop-authorization errors.
+→ **Answer `y`** if you want that dashboard always running in the
+background; **`N`** to skip (run it yourself later with
+`plugins/ztr_dashboard.py` when you want it).
+
+**3. `Dummy IP for tunneled sessions to bind to [10.10.15.10]:`**
+Only appears if question 1 was `y` (or `--with-local-ip`/`--with-service` was
+passed). This sets up a real dedicated network interface that
+`ztr_tunnel_lp.py`'s listeners — and the dashboard, if you're setting both up
+together — bind to, instead of the generic `127.0.0.1`.
 → **Just press Enter** to accept the default (`10.10.15.10`) unless that
 address conflicts with something else on your network.
 
-**3. `<prefix> isn't on your PATH yet — add PATH + shell aliases for ztr_ssh/ztr_forward/ztr_pg to <rc file>? [y/N]:`**
+**4. `<prefix> isn't on your PATH yet — add PATH + shell aliases for ztr_ssh/ztr_forward/ztr_pg to <rc file>? [y/N]:`**
 Only appears if `~/.local/bin` (or your `--prefix`) isn't already on your
 `PATH` — common on a fresh machine. It detects your shell's rc file
 (`.zshrc`, `.bashrc`, or `.bash_profile`) automatically.
@@ -113,9 +119,10 @@ Only appears if `~/.local/bin` (or your `--prefix`) isn't already on your
 yourself — the exact lines it would have added are printed either way if
 you say no, so you can copy them in by hand later.
 
-**4. `Path to your downloaded .ztr route config:`**
-Only appears if the service is being set up (question 1 was `y`, or
-`--with-service` was passed). Give it the path to a `.ztr` file you
+**5. `Path to your downloaded .ztr route config:`**
+Only appears if the tunnel service is being set up (question 1 was `y`, or
+`--with-service` was passed) — the dashboard silently reuses this same
+config rather than asking again. Give it the path to a `.ztr` file you
 downloaded from a route in your dashboard — it gets copied into `routes/`
 and wired into the service unit.
 → There's no sensible default here; if you don't have a route config yet,
@@ -203,7 +210,7 @@ needs it (the dummy network interface).
 
 **`permission denied` on `./installer-linux.sh`** — you're on a release zip
 built before v1.0.2, which shipped without the executable bit. Either
-`chmod +x installer-linux.sh installer-macos.sh` yourself, or re-download
+`chmod +x installer-linux.sh` yourself, or re-download
 the [latest release](https://github.com/igenius21fm/ztrclient/releases/latest).
 
 **`couldn't create the venv — ... sudo apt install python3-venv`** (Linux)
@@ -269,7 +276,7 @@ traceback.
 ## Uninstall
 
 ```bash
-./installer-linux.sh --uninstall   # or installer-macos.sh
+./installer-linux.sh --uninstall
 ```
 
 Removes the symlinked wrappers, the venv, the background service (if any),
@@ -283,15 +290,16 @@ and any `.ztr` configs in it are left alone.
 - `launcher.py` — standalone tool for signing a dashboard nonce with your
   RSA key (see [Getting connected](#getting-connected)) — not the client
   entry point itself.
-- `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, and `ztr_tunnel_lp.py`
-  (the persistent-service target).
+- `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_tunnel_lp.py` (the
+  persistent tunnel service target), and `ztr_dashboard.py` (the local
+  tunnel/traffic dashboard).
 - `utils/crypt_bot.py` — RSA/AES helper used for signing and encrypting
   messages to the relay.
 - `routes/` — where your downloaded `.ztr` route configs go (see
   [Getting connected](#getting-connected)). Ships empty (aside from its own
   README) — the installer's `mkdir -p` would create it anyway, but it's
   here from the start so it's not a surprise.
-- `installer-linux.sh` / `installer-macos.sh` — see [Install](#install).
+- `installer-linux.sh` — see [Install](#install).
 
 ## Example apps
 
