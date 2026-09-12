@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # macOS installer for the ZTRelay plugin wrappers (ztr_ssh, ztr_forward,
 # ztr_pg) so they run from anywhere, without a manual shell alias per
-# docs/ztrclient's "Alias it" sections. Does NOT touch the platform, the
-# dashboard, or ztrClient.py itself — this is scoped to plugins/ only.
+# docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
+# ztrClient.py itself — this is scoped to plugins/ only (which is also
+# where ztr_tunnel_lp.py and ztr_dashboard.py live).
 # On Linux? Use installer-linux.sh instead — this one assumes launchd
 # and `ifconfig`, neither of which exist there.
 #
@@ -10,15 +11,17 @@
 #   ./installer-macos.sh --prefix DIR          install into DIR instead
 #   ./installer-macos.sh --venv-dir DIR        put ztr's own Python venv at DIR instead of ~/.local/share/ztr/venv
 #   ./installer-macos.sh --with-service        also set up ztr_tunnel_lp.py as a launchd agent
+#   ./installer-macos.sh --with-dashboard      also set up ztr_dashboard.py as a launchd agent
 #   ./installer-macos.sh --with-local-ip       also set up a dedicated loopback alias for tunneled sessions
 #   ./installer-macos.sh --local-ip IP         use IP instead of the default 10.10.15.10
-#   ./installer-macos.sh --uninstall           remove the installed wrappers (agent, venv, and loopback alias, if present)
+#   ./installer-macos.sh --uninstall           remove the installed wrappers (agents, venv, and loopback alias, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up the agent, and (if so, or if --with-local-ip was passed) what IP to
-# use. --with-service/--with-local-ip/--local-ip above are for skipping
-# those prompts — non-interactive runs (CI, provisioning scripts, piped
-# input) skip them automatically and just take the flags/defaults given.
+# up each agent, and (if either one, or if --with-local-ip was passed) what
+# IP to use. --with-service/--with-dashboard/--with-local-ip/--local-ip
+# above are for skipping those prompts — non-interactive runs (CI,
+# provisioning scripts, piped input) skip them automatically and just take
+# the flags/defaults given.
 #
 # What it actually does:
 #   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg} executable — a zip
@@ -29,21 +32,27 @@
 #      installs pycryptodome into it — ztr_tunnel_lp.py imports RelayClient
 #      from ztrClient.py, which needs it. Keeping this in its own venv
 #      instead of --user/system site-packages means it can't clash with
-#      whatever else is installed on your system python3. The launchd
-#      agent (--with-service) runs using this venv's interpreter.
+#      whatever else is installed on your system python3. Both launchd
+#      agents (--with-service, --with-dashboard) run using this venv's
+#      interpreter. With --with-dashboard, also offers to install scapy
+#      into it — only needed for the dashboard's live traffic panel.
 #   3. Symlinks the three wrappers into --prefix (default ~/.local/bin),
 #      so `ztr_ssh`/`ztr_forward`/`ztr_pg` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: adds --local-ip (default 10.10.15.10) as a
 #      loopback alias (`ifconfig lo0 alias ...`), so ztr_tunnel_lp.py's
-#      per-session listeners bind to a dedicated address instead of the
-#      generic 127.0.0.1 — needs sudo, requires you to run this yourself,
-#      and doesn't persist across reboot on its own (see the note this
-#      step prints).
+#      per-session listeners (and the dashboard, if you set it up) bind to
+#      a dedicated address instead of the generic 127.0.0.1 — needs sudo,
+#      requires you to run this yourself, and doesn't persist across
+#      reboot on its own (see the note this step prints).
 #   5. With --with-service: installs ztr_tunnel_lp.py as a per-user
 #      launchd agent (~/Library/LaunchAgents), prompting for your .ztr
 #      config path. Restarts on crash, starts at login — the launchd
 #      equivalent of installer-linux.sh's systemd unit.
+#   6. With --with-dashboard: installs ztr_dashboard.py as a launchd agent
+#      the same way — reuses the .ztr config from --with-service above if
+#      you set both up together, otherwise prompts for its own (or none,
+#      if you just want the tunnel/error panels).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +65,8 @@ LOCAL_IP="${LOCAL_IP:-10.10.15.10}"
 LOCAL_IP_SET_BY_USER=0
 WITH_SERVICE=0
 WITH_SERVICE_SET_BY_USER=0
+WITH_DASHBOARD=0
+WITH_DASHBOARD_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 
@@ -71,7 +82,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -87,6 +98,11 @@ while [[ $# -gt 0 ]]; do
     --with-service)
       WITH_SERVICE=1
       WITH_SERVICE_SET_BY_USER=1
+      shift
+      ;;
+    --with-dashboard)
+      WITH_DASHBOARD=1
+      WITH_DASHBOARD_SET_BY_USER=1
       shift
       ;;
     --with-local-ip)
@@ -119,6 +135,11 @@ AGENT_PLIST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
 AGENT_LOG_OUT="$HOME/Library/Logs/ztr-tunnel-lp.log"
 AGENT_LOG_ERR="$HOME/Library/Logs/ztr-tunnel-lp.err.log"
 
+DASHBOARD_AGENT_LABEL="com.ztrelay.dashboard"
+DASHBOARD_AGENT_PLIST="$HOME/Library/LaunchAgents/${DASHBOARD_AGENT_LABEL}.plist"
+DASHBOARD_AGENT_LOG_OUT="$HOME/Library/Logs/ztr-dashboard.log"
+DASHBOARD_AGENT_LOG_ERR="$HOME/Library/Logs/ztr-dashboard.err.log"
+
 # Ask up front rather than requiring you to already know the flag exists —
 # only when you didn't already say one way or the other with --with-service,
 # and only when actually running interactively (skip in scripts/CI, and
@@ -127,6 +148,16 @@ if [[ "$WITH_SERVICE_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Set up ztr_tunnel_lp.py as a persistent launchd agent? [y/N]: " WITH_SERVICE_ANSWER
   case "$WITH_SERVICE_ANSWER" in
     [yY]*) WITH_SERVICE=1 ;;
+  esac
+fi
+
+# Same idea, asked separately — the dashboard doesn't need the tunnel
+# agent (or vice versa), so answering one shouldn't silently decide the
+# other.
+if [[ "$WITH_DASHBOARD_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Set up ztr_dashboard.py as a persistent launchd agent? [y/N]: " WITH_DASHBOARD_ANSWER
+  case "$WITH_DASHBOARD_ANSWER" in
+    [yY]*) WITH_DASHBOARD=1 ;;
   esac
 fi
 
@@ -199,6 +230,13 @@ uninstall() {
     log_ok "agent removed."
   fi
 
+  if [[ -f "$DASHBOARD_AGENT_PLIST" ]]; then
+    log_info "stopping and removing the $DASHBOARD_AGENT_LABEL launchd agent ..."
+    launchctl unload -w "$DASHBOARD_AGENT_PLIST" >/dev/null 2>&1 || true
+    rm -f "$DASHBOARD_AGENT_PLIST"
+    log_ok "agent removed."
+  fi
+
   if [[ -d "$VENV_DIR" ]]; then
     log_info "removing ztr's venv at $VENV_DIR ..."
     rm -rf "$VENV_DIR"
@@ -262,6 +300,18 @@ else
   log_info "installing pycryptodome into the venv ..."
   "$VENV_PY" -m pip install --quiet --upgrade pip pycryptodome
   log_ok "pycryptodome installed."
+fi
+
+# Only needed for the dashboard's live traffic panel — best-effort, since
+# that panel is optional and everything else works fine without it.
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  if "$VENV_PY" -c "import scapy" >/dev/null 2>&1; then
+    log_ok "scapy already installed in the venv."
+  elif "$VENV_PY" -m pip install --quiet scapy; then
+    log_ok "scapy installed — live traffic capture available (needs root or the access_bpf group to actually run)."
+  else
+    log_warn "couldn't install scapy — the dashboard's live traffic panel will stay off, everything else still works."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -414,6 +464,86 @@ EOF
     echo "${C_DIM}    launchctl list | grep $AGENT_LABEL${C_RESET}"
     echo "${C_DIM}    tail -f $AGENT_LOG_OUT${C_RESET}"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  log_info "setting up ztr_dashboard.py as a launchd agent ..."
+
+  # The tunnel agent's config, if this run also set one up, works just as
+  # well for the dashboard (same route) — offer it as the default instead
+  # of asking you to type the same path twice.
+  DASHBOARD_CONFIG_PROMPT="Path to a .ztr route config for the dashboard to diagram (blank for none)"
+  if [[ -n "${ZTR_CONFIG_NAME:-}" ]]; then
+    read -r -p "$DASHBOARD_CONFIG_PROMPT [$ZTR_CONFIG_NAME]: " ZTR_DASHBOARD_CONFIG_SRC
+    ZTR_DASHBOARD_CONFIG_SRC="${ZTR_DASHBOARD_CONFIG_SRC:-$ZTR_CONFIG_NAME}"
+  else
+    read -r -p "$DASHBOARD_CONFIG_PROMPT: " ZTR_DASHBOARD_CONFIG_SRC
+  fi
+
+  DASHBOARD_CONFIG_ARGS=""
+  if [[ -n "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+    # Same as --with-service above: whatever it points at ends up as its
+    # own file directly inside routes/, since that's the only place
+    # ztrClient.py (RelayConfig) will ever look for it.
+    if [[ -f "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+      mkdir -p "$SCRIPT_DIR/routes"
+      ZTR_DASHBOARD_CONFIG_NAME="$(basename "$ZTR_DASHBOARD_CONFIG_SRC")"
+      ZTR_DASHBOARD_CONFIG_DEST="$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_NAME"
+      ZTR_DASHBOARD_CONFIG_SRC_ABS="$(cd "$(dirname "$ZTR_DASHBOARD_CONFIG_SRC")" && pwd)/$ZTR_DASHBOARD_CONFIG_NAME"
+      if [[ "$ZTR_DASHBOARD_CONFIG_SRC_ABS" != "$ZTR_DASHBOARD_CONFIG_DEST" ]]; then
+        cp "$ZTR_DASHBOARD_CONFIG_SRC" "$ZTR_DASHBOARD_CONFIG_DEST"
+        log_ok "copied to $ZTR_DASHBOARD_CONFIG_DEST"
+      fi
+      DASHBOARD_CONFIG_ARGS="    <string>--config-file</string>
+    <string>$ZTR_DASHBOARD_CONFIG_NAME</string>"
+    elif [[ -f "$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+      # Already just a name sitting in routes/ (e.g. reused from
+      # --with-service above, which already copied it there).
+      DASHBOARD_CONFIG_ARGS="    <string>--config-file</string>
+    <string>$ZTR_DASHBOARD_CONFIG_SRC</string>"
+    else
+      log_warn "no file at $ZTR_DASHBOARD_CONFIG_SRC — starting the dashboard without a config (tunnel/error panels only)."
+    fi
+  fi
+
+  mkdir -p "$(dirname "$DASHBOARD_AGENT_PLIST")" "$(dirname "$DASHBOARD_AGENT_LOG_OUT")"
+  cat > "$DASHBOARD_AGENT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$DASHBOARD_AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$VENV_PY</string>
+    <string>$SCRIPT_DIR/plugins/ztr_dashboard.py</string>
+$DASHBOARD_CONFIG_ARGS
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$SCRIPT_DIR</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$DASHBOARD_AGENT_LOG_OUT</string>
+  <key>StandardErrorPath</key>
+  <string>$DASHBOARD_AGENT_LOG_ERR</string>
+</dict>
+</plist>
+EOF
+  launchctl unload -w "$DASHBOARD_AGENT_PLIST" >/dev/null 2>&1 || true
+  launchctl load -w "$DASHBOARD_AGENT_PLIST"
+  log_ok "agent installed and started: $DASHBOARD_AGENT_LABEL"
+  echo "${C_DIM}    launchctl list | grep $DASHBOARD_AGENT_LABEL${C_RESET}"
+  echo "${C_DIM}    tail -f $DASHBOARD_AGENT_LOG_OUT${C_RESET}"
+  log_warn "live traffic capture (if scapy is installed) still needs root or the access_bpf group to actually"
+  log_warn "capture packets — a plain launchd agent won't have raw-socket privileges on its own."
 fi
 
 echo

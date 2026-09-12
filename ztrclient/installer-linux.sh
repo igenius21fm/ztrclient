@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Linux installer for the ZTRelay plugin wrappers (ztr_ssh, ztr_forward,
 # ztr_pg) so they run from anywhere, without a manual shell alias per
-# docs/ztrclient's "Alias it" sections. Does NOT touch the platform, the
-# dashboard, or ztrClient.py itself — this is scoped to plugins/ only.
+# docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
+# ztrClient.py itself — this is scoped to plugins/ only (which is also
+# where ztr_tunnel_lp.py and ztr_dashboard.py live).
 # On macOS? Use installer-macos.sh instead — this one assumes systemd
 # and `ip addr`, neither of which exist there.
 #
@@ -10,15 +11,17 @@
 #   ./installer-linux.sh --prefix DIR          install into DIR instead
 #   ./installer-linux.sh --venv-dir DIR        put ztr's own Python venv at DIR instead of ~/.local/share/ztr/venv
 #   ./installer-linux.sh --with-service        also set up ztr_tunnel_lp.py as a systemd --user service
+#   ./installer-linux.sh --with-dashboard      also set up ztr_dashboard.py as a systemd --user service
 #   ./installer-linux.sh --with-local-ip       also set up a dedicated dummy interface for tunneled sessions
 #   ./installer-linux.sh --local-ip IP         use IP instead of the default 10.10.15.10
-#   ./installer-linux.sh --uninstall           remove the installed wrappers (service, venv, and dummy interface, if present)
+#   ./installer-linux.sh --uninstall           remove the installed wrappers (services, venv, and dummy interface, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up the service, and (if so, or if --with-local-ip was passed) what IP to
-# use. --with-service/--with-local-ip/--local-ip above are for skipping
-# those prompts — non-interactive runs (CI, provisioning scripts, piped
-# input) skip them automatically and just take the flags/defaults given.
+# up each service, and (if either one, or if --with-local-ip was passed)
+# what IP to use. --with-service/--with-dashboard/--with-local-ip/--local-ip
+# above are for skipping those prompts — non-interactive runs (CI,
+# provisioning scripts, piped input) skip them automatically and just take
+# the flags/defaults given.
 #
 # What it actually does:
 #   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg} executable — a zip
@@ -29,21 +32,27 @@
 #      installs pycryptodome into it — ztr_tunnel_lp.py imports RelayClient
 #      from ztrClient.py, which needs it. Keeping this in its own venv
 #      instead of --user/system site-packages means it can't clash with
-#      whatever else is installed on your system python3. The systemd
-#      service (--with-service) runs using this venv's interpreter.
+#      whatever else is installed on your system python3. Both systemd
+#      services (--with-service, --with-dashboard) run using this venv's
+#      interpreter. With --with-dashboard, also offers to install scapy
+#      into it — only needed for the dashboard's live traffic panel.
 #   3. Symlinks the three wrappers into --prefix (default ~/.local/bin),
 #      so `ztr_ssh`/`ztr_forward`/`ztr_pg` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: creates ztr_i0, a real dummy interface (`ip
 #      link add ztr_i0 type dummy`), and binds --local-ip (default
-#      10.10.15.10) to it, so ztr_tunnel_lp.py's per-session listeners have
-#      a dedicated interface to bind to instead of the generic 127.0.0.1 —
-#      needs sudo, requires you to run this yourself. Also installs a
-#      system-level systemd unit (ztr-dummy-if.service) that recreates the
-#      interface on every boot, so this survives a reboot without you
-#      having to re-run anything.
+#      10.10.15.10) to it, so ztr_tunnel_lp.py's per-session listeners (and
+#      the dashboard, if you set it up) have a dedicated interface to bind
+#      to instead of the generic 127.0.0.1 — needs sudo, requires you to
+#      run this yourself. Also installs a system-level systemd unit
+#      (ztr-dummy-if.service) that recreates the interface on every boot,
+#      so this survives a reboot without you having to re-run anything.
 #   5. With --with-service: installs ztr_tunnel_lp.py as a systemd --user
 #      service, prompting for your .ztr config path.
+#   6. With --with-dashboard: installs ztr_dashboard.py as a systemd --user
+#      service the same way — reuses the .ztr config from --with-service
+#      above if you set both up together, otherwise prompts for its own
+#      (or none, if you just want the tunnel/error panels).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +65,8 @@ LOCAL_IP="${LOCAL_IP:-10.10.15.10}"
 LOCAL_IP_SET_BY_USER=0
 WITH_SERVICE=0
 WITH_SERVICE_SET_BY_USER=0
+WITH_DASHBOARD=0
+WITH_DASHBOARD_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 
@@ -71,7 +82,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -87,6 +98,11 @@ while [[ $# -gt 0 ]]; do
     --with-service)
       WITH_SERVICE=1
       WITH_SERVICE_SET_BY_USER=1
+      shift
+      ;;
+    --with-dashboard)
+      WITH_DASHBOARD=1
+      WITH_DASHBOARD_SET_BY_USER=1
       shift
       ;;
     --with-local-ip)
@@ -115,6 +131,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 SERVICE_UNIT="$HOME/.config/systemd/user/ztr-tunnel-lp.service"
+DASHBOARD_SERVICE_UNIT="$HOME/.config/systemd/user/ztr-dashboard.service"
 IFACE_NAME="ztr_i0"
 DUMMY_IF_UNIT="/etc/systemd/system/ztr-dummy-if.service"
 
@@ -126,6 +143,16 @@ if [[ "$WITH_SERVICE_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Set up ztr_tunnel_lp.py as a persistent systemd --user service? [y/N]: " WITH_SERVICE_ANSWER
   case "$WITH_SERVICE_ANSWER" in
     [yY]*) WITH_SERVICE=1 ;;
+  esac
+fi
+
+# Same idea, asked separately — the dashboard doesn't need the tunnel
+# service (or vice versa), so answering one shouldn't silently decide the
+# other.
+if [[ "$WITH_DASHBOARD_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Set up ztr_dashboard.py as a persistent systemd --user service? [y/N]: " WITH_DASHBOARD_ANSWER
+  case "$WITH_DASHBOARD_ANSWER" in
+    [yY]*) WITH_DASHBOARD=1 ;;
   esac
 fi
 
@@ -198,6 +225,14 @@ uninstall() {
     log_info "stopping and removing the ztr-tunnel-lp systemd service ..."
     systemctl --user disable --now ztr-tunnel-lp.service >/dev/null 2>&1 || true
     rm -f "$SERVICE_UNIT"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    log_ok "service removed."
+  fi
+
+  if [[ -f "$DASHBOARD_SERVICE_UNIT" ]]; then
+    log_info "stopping and removing the ztr-dashboard systemd service ..."
+    systemctl --user disable --now ztr-dashboard.service >/dev/null 2>&1 || true
+    rm -f "$DASHBOARD_SERVICE_UNIT"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     log_ok "service removed."
   fi
@@ -288,6 +323,18 @@ else
   log_info "installing pycryptodome into the venv ..."
   "$VENV_PY" -m pip install --quiet --upgrade pip pycryptodome
   log_ok "pycryptodome installed."
+fi
+
+# Only needed for the dashboard's live traffic panel — best-effort, since
+# that panel is optional and everything else works fine without it.
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  if "$VENV_PY" -c "import scapy" >/dev/null 2>&1; then
+    log_ok "scapy already installed in the venv."
+  elif "$VENV_PY" -m pip install --quiet scapy; then
+    log_ok "scapy installed — live traffic capture available (needs root or equivalent raw-socket privileges to actually run)."
+  else
+    log_warn "couldn't install scapy — the dashboard's live traffic panel will stay off, everything else still works."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -459,6 +506,82 @@ EOF
       echo "${C_DIM}    systemctl --user status ztr-tunnel-lp.service${C_RESET}"
       echo "${C_DIM}    journalctl --user -u ztr-tunnel-lp.service -f${C_RESET}"
     fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
+  log_info "setting up ztr_dashboard.py as a systemd --user service ..."
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log_err "systemctl not found — this installer is Linux/systemd-specific. On macOS, use installer-macos.sh instead."
+    log_warn "run it standalone instead: $VENV_PY $SCRIPT_DIR/plugins/ztr_dashboard.py --config-file route.ztr"
+  elif [[ -z "${XDG_RUNTIME_DIR:-}" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
+    # Same "no systemd --user session" case as --with-service above.
+    log_err "no systemd --user session available for this account (XDG_RUNTIME_DIR unset, or its D-Bus isn't reachable)."
+    log_warn "if you reached this shell via su/sudo into this user: log in directly as them instead (SSH or"
+    log_warn "console) and re-run. If you're already logged in directly: try 'loginctl enable-linger \$USER',"
+    log_warn "then log out and back in. If systemd doesn't run here at all (containers, WSL without systemd"
+    log_warn "enabled), --with-dashboard can't work — run it yourself instead, in the foreground:"
+    log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_dashboard.py"
+  else
+    # The tunnel service's config, if this run also set one up, works just
+    # as well for the dashboard (same route) — offer it as the default
+    # instead of asking you to type the same path twice.
+    DASHBOARD_CONFIG_PROMPT="Path to a .ztr route config for the dashboard to diagram (blank for none)"
+    if [[ -n "${ZTR_CONFIG_NAME:-}" ]]; then
+      read -r -p "$DASHBOARD_CONFIG_PROMPT [$ZTR_CONFIG_NAME]: " ZTR_DASHBOARD_CONFIG_SRC
+      ZTR_DASHBOARD_CONFIG_SRC="${ZTR_DASHBOARD_CONFIG_SRC:-$ZTR_CONFIG_NAME}"
+    else
+      read -r -p "$DASHBOARD_CONFIG_PROMPT: " ZTR_DASHBOARD_CONFIG_SRC
+    fi
+
+    DASHBOARD_EXEC="plugins/ztr_dashboard.py"
+    if [[ -n "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+      # Same as --with-service above: whatever it points at ends up as its
+      # own file directly inside routes/, since that's the only place
+      # ztrClient.py (RelayConfig) will ever look for it.
+      if [[ -f "$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+        mkdir -p "$SCRIPT_DIR/routes"
+        ZTR_DASHBOARD_CONFIG_NAME="$(basename "$ZTR_DASHBOARD_CONFIG_SRC")"
+        ZTR_DASHBOARD_CONFIG_DEST="$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_NAME"
+        ZTR_DASHBOARD_CONFIG_SRC_ABS="$(cd "$(dirname "$ZTR_DASHBOARD_CONFIG_SRC")" && pwd)/$ZTR_DASHBOARD_CONFIG_NAME"
+        if [[ "$ZTR_DASHBOARD_CONFIG_SRC_ABS" != "$ZTR_DASHBOARD_CONFIG_DEST" ]]; then
+          cp "$ZTR_DASHBOARD_CONFIG_SRC" "$ZTR_DASHBOARD_CONFIG_DEST"
+          log_ok "copied to $ZTR_DASHBOARD_CONFIG_DEST"
+        fi
+        DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_NAME"
+      elif [[ -f "$SCRIPT_DIR/routes/$ZTR_DASHBOARD_CONFIG_SRC" ]]; then
+        # Already just a name already sitting in routes/ (e.g. reused from
+        # --with-service above, which already copied it there).
+        DASHBOARD_EXEC="$DASHBOARD_EXEC --config-file $ZTR_DASHBOARD_CONFIG_SRC"
+      else
+        log_warn "no file at $ZTR_DASHBOARD_CONFIG_SRC — starting the dashboard without a config (tunnel/error panels only)."
+      fi
+    fi
+
+    mkdir -p "$(dirname "$DASHBOARD_SERVICE_UNIT")"
+    cat > "$DASHBOARD_SERVICE_UNIT" <<EOF
+[Unit]
+Description=ZTRelay client dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$VENV_PY $DASHBOARD_EXEC
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now ztr-dashboard.service
+    log_ok "service installed and started: ztr-dashboard.service"
+    echo "${C_DIM}    systemctl --user status ztr-dashboard.service${C_RESET}"
+    echo "${C_DIM}    journalctl --user -u ztr-dashboard.service -f${C_RESET}"
+    log_warn "live traffic capture (if scapy is installed) still needs this service run as root to actually"
+    log_warn "capture packets — systemd --user services don't have raw-socket privileges on their own."
   fi
 fi
 
