@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZTRelay client dashboard</title>
+<link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5.5 3.4 9.7 8 11 4.6-1.3 8-5.5 8-11V5l-8-3Z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></symbol>
+  <symbol id="icon-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1"/><path d="M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1"/></symbol>
+  <symbol id="icon-signal" viewBox="0 0 24 24"><path d="M4 18v-2"/><path d="M9 18v-6"/><path d="M14 18V8"/><path d="M19 18V4"/></symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.2A11 11 0 0 1 12 5c7 0 11 7 11 7a13.5 13.5 0 0 1-3.2 4"/><path d="M6.6 6.6C3.8 8.4 2 12 2 12s4 7 11 7a10 10 0 0 0 3.4-.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></symbol>
+  <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m10.8 12.2 8.2-8.2"/><path d="m16 6 2 2"/><path d="m13.5 8.5 2 2"/></symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="icon-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 8v6l-4-2v-4L4 5Z"/></symbol>
+  <symbol id="icon-terminal" viewBox="0 0 24 24"><path d="m5 7 5 5-5 5"/><path d="M12 17h7"/></symbol>
+  <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></symbol>
+  <symbol id="icon-send" viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 14h10l1-14"/></symbol>
+  <symbol id="icon-list" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></symbol>
+  <symbol id="icon-ext-link" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v6H4V6h6"/></symbol>
+  <symbol id="icon-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
+</svg>
+  <div class="topbar">
+    <h1><svg class="icon"><use href="#icon-shield"></use></svg> ZTRelay Dashboard</h1>
+    <span class="sub d-none d-md-inline">this machine only &middot; read-only</span>
+    <div class="status-badge">
+      <span><svg class="icon"><use href="#icon-clock"></use></svg> <span class="clock" id="session-clock">T+00:00:00</span></span>
+      <span id="route-status" class="route-status unknown">NO ROUTE</span>
+      <button class="btn" data-bs-toggle="offcanvas" data-bs-target="#tools-menu">
+        <svg class="icon"><use href="#icon-menu"></use></svg> Tools
+      </button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn" id="pause-btn">Pause</button>
+    <button class="btn" id="refresh-btn">Refresh now</button>
+    <span class="d-none d-md-inline">hotkeys: <kbd>P</kbd> pause &middot; <kbd>R</kbd> refresh</span>
+    <span id="last-updated"></span>
+  </div>
+
+  <div class="main-wrap">
+    <div class="row g-4">
+      <div class="col-lg-8">
+        <div class="row g-3 mb-2">
+          <div class="col-sm-6">
+            <div class="mcard">
+              <div class="label">Active tunnels</div>
+              <div class="value ok" id="total-tunnels">&mdash;</div>
+            </div>
+          </div>
+          <div class="col-sm-6">
+            <div class="mcard">
+              <div class="label">Live traffic capture</div>
+              <div class="value off" id="traffic-status">&mdash;</div>
+            </div>
+          </div>
+        </div>
+
+        <section class="panel" id="creds-section" style="display:none">
+          <h2><svg class="icon"><use href="#icon-key"></use></svg> Route credentials</h2>
+          <div class="mcard">
+            <div class="creds-row">
+              <span class="creds-label">Route ID</span>
+              <span class="creds-value" id="creds-route_id">&mdash;</span>
+            </div>
+            <div class="creds-row">
+              <span class="creds-label">Client ID</span>
+              <span class="creds-value masked" id="creds-identifier">&mdash;</span>
+              <button class="reveal-btn" data-field="identifier" title="Toggle reveal">
+                <svg class="icon icon-eye"><use href="#icon-eye"></use></svg>
+                <svg class="icon icon-eye-off" style="display:none"><use href="#icon-eye-off"></use></svg>
+              </button>
+            </div>
+            <div class="creds-row">
+              <span class="creds-label">Secret key</span>
+              <span class="creds-value masked" id="creds-secret_key">&mdash;</span>
+              <button class="reveal-btn" data-field="secret_key" title="Toggle reveal">
+                <svg class="icon icon-eye"><use href="#icon-eye"></use></svg>
+                <svg class="icon icon-eye-off" style="display:none"><use href="#icon-eye-off"></use></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" id="chain-section" style="display:none">
+          <h2><svg class="icon"><use href="#icon-link"></use></svg> Hop chain <span class="hint">click a hop for details</span></h2>
+          <div class="chain" id="chain"></div>
+        </section>
+
+        <section class="panel">
+          <h2><svg class="icon"><use href="#icon-signal"></use></svg> Tunnels by port <span class="hint">click a row to filter the traffic feed</span></h2>
+          <table class="mtable" id="ports-table"><tbody></tbody></table>
+        </section>
+
+        <section class="panel">
+          <h2><svg class="icon"><use href="#icon-alert"></use></svg> Recent hop-authorization errors</h2>
+          <div class="input-group-icon">
+            <input class="filter-input" id="error-filter" type="search" placeholder="Filter by code or message&hellip;">
+          </div>
+          <table class="mtable" id="errors-table"><tbody></tbody></table>
+        </section>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="term-col">
+          <section class="panel" id="traffic-section" style="display:none">
+            <h2><svg class="icon"><use href="#icon-terminal"></use></svg> Live traffic <span class="hint" id="traffic-hint"></span></h2>
+            <div class="term-window">
+              <div class="term-titlebar"><span class="dot" id="term-live-dot"></span> entry-hop.feed</div>
+              <div class="term-body" id="term-body"></div>
+              <div class="term-footer">
+                <span id="term-footer-text">Run <code>systemctl --user restart ztr-dashboard.service</code> to restart the dashboard</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="hop-modal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Hop &mdash; <span id="hop-modal-role"></span></h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="creds-row"><span class="creds-label">Address</span><span class="creds-value" id="hop-modal-address"></span></div>
+          <div class="creds-row"><span class="creds-label">Status</span><span class="creds-value" id="hop-modal-status"></span></div>
+          <p class="hint mt-3 mb-1">Public key</p>
+          <div class="pubkey-box" id="hop-modal-pubkey"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-check-mil" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="offcanvas offcanvas-end" tabindex="-1" id="tools-menu">
+    <div class="offcanvas-header">
+      <h5 class="offcanvas-title"><svg class="icon"><use href="#icon-menu"></use></svg> Tools</h5>
+      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
+    </div>
+    <div class="offcanvas-body">
+      <section class="tool-block">
+        <h6><svg class="icon"><use href="#icon-key"></use></svg> Sign a nonce</h6>
+        <p class="hint">Same identity keypair as <code>launcher.py</code> — signs whatever nonce your dashboard's Keys panel gives you.</p>
+        <input class="filter-input" id="sign-nonce-input" placeholder="Paste the nonce here">
+        <button class="btn mb-2" id="sign-nonce-btn">Sign</button>
+        <div id="sign-result" style="display:none">
+          <p class="hint mb-1">Public key</p>
+          <div class="pubkey-box" id="sign-pubkey"></div>
+          <p class="hint mt-2 mb-1">Signature (hex)</p>
+          <div class="pubkey-box" id="sign-signature"></div>
+        </div>
+        <div class="error-code mt-1" id="sign-error" style="display:none"></div>
+      </section>
+
+      <hr>
+
+      <section class="tool-block" id="tb-active-tunnels">
+        <h6><svg class="icon"><use href="#icon-list"></use></svg> Active tunnels <span class="hint">tunnel_cache.db</span></h6>
+        <div class="d-flex gap-2 mb-2">
+          <button class="btn" id="tunnels-refresh-btn">Refresh</button>
+          <button class="btn" id="tunnels-reset-btn"><svg class="icon"><use href="#icon-trash"></use></svg> Reset DB</button>
+        </div>
+        <table class="mtable" id="tunnels-table"><tbody></tbody></table>
+      </section>
+
+      <hr>
+
+      <section class="tool-block">
+        <h6><svg class="icon"><use href="#icon-send"></use></svg> Send PING <span class="hint">native mode only</span></h6>
+        <input class="filter-input" id="ping-target-host" placeholder="target host (required)">
+        <input class="filter-input" id="ping-target-port" type="number" placeholder="target port (optional)">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="ping-with-encryption">
+          <label class="form-check-label" for="ping-with-encryption">with_encryption</label>
+        </div>
+        <input class="filter-input" id="ping-pubkey-path" placeholder="recipient public key path" style="display:none">
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="ping-with-timing-defense">
+          <label class="form-check-label" for="ping-with-timing-defense">with_timing_defense</label>
+        </div>
+        <button class="btn" id="ping-send-btn">Send PING</button>
+        <div class="mt-2" id="ping-result"></div>
+      </section>
+
+      <hr>
+
+      <a class="hint" href="https://github.com/igenius21fm/ztrapps" target="_blank" rel="noopener">
+        <svg class="icon"><use href="#icon-ext-link"></use></svg> ztrapps on GitHub
+      </a>
+    </div>
+  </div>
+
+<script src="/static/vendor/jquery.min.js"></script>
+<script src="/static/vendor/bootstrap.bundle.min.js"></script>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
