@@ -664,12 +664,12 @@ class RelayClient(RelayConfig):
             self.set_log(f"[set_tunnel] Failed with error({result.get('error_code')}, {result.get('error')})")
         return result
 
-    def send_HTH(self,sock: socket.socket, payload: bytes, session_id:str):
+    def send_HTH(self,sock: socket.socket, payload: bytes, session_id:str, encrypt_payload=False):
         """ Use this send your data"""
         # session_id len is always 64
         session_bytes = session_id.encode("utf-8")
 
-        if self._e2e_crypt is not None:
+        if self._e2e_crypt is not None and encrypt_payload:
             # Only set if with_encryption() got a recipient_pubkey_path —
             # unrelated to self.secure_transport (see struct_payload()).
             try:
@@ -684,7 +684,7 @@ class RelayClient(RelayConfig):
         except OSError as e:
             raise NetworkError(f"failed to send data over the tunnel: {e}") from e
 
-    def recv_HTH(self, sock: socket.socket):
+    def recv_HTH(self, sock: socket.socket, decrypt_payload=False):
         """ Use this to recv your data is you had Native = True"""
         HEADER_FORMAT = ">I64s"
         HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
@@ -704,7 +704,7 @@ class RelayClient(RelayConfig):
         except (OSError, ConnectionError) as e:
             raise NetworkError(f"connection dropped while receiving data over the tunnel: {e}") from e
 
-        if self._e2e_crypt is not None:
+        if self._e2e_crypt is not None and decrypt_payload:
             try:
                 decrypted = self._e2e_crypt.decrypt_msg_verifyBytesPayload(payload, as_="bytes")
             except Exception as e:
