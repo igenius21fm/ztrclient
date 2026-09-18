@@ -427,6 +427,24 @@ class RelayClient(RelayConfig):
         except ValueError:
             return item
 
+    def get_hi_salt(self):
+        pathSalt = f"{self.SCRIPT_DIR}/.hi_salt"
+        if not os.path.exists(pathSalt):
+            with open(pathSalt, "w") as f:
+                f.write(secrets.token_urlsafe(64))
+        salt = open(pathSalt, "r").read()
+        return salt
+    
+    def get_hop_id(self, hop: str):
+        salt = self.get_hi_salt()
+        return self.sha256(f"{salt}_{hop}")
+    
+    def get_hop_from_hop_id(self, hop_id: str):
+        for hop in self.hops:
+            if self.get_hop_id(hop) == hop_id:
+                return hop
+        return None
+
     def hops_instructions(self, hops: list) -> list:
         """
             One encrypted blob per hop, in chain order — not a dict every
@@ -442,7 +460,12 @@ class RelayClient(RelayConfig):
         instructions = []
         for i, hop in enumerate(hops):
             next_hop = hops[i + 1] if i < len(hops) - 1 else self.exit_hop
-            blob = self._encrypt_for(hop, next_hop)
+            data = {
+                "hop_id": self.get_hop_id(hop),
+                "next_hop": next_hop,
+                "next_hop_id": self.get_hop_id(next_hop)
+            }
+            blob = self._encrypt_for(hop, json.dumps(data))
             instructions.append(base64.b64encode(blob).decode("ascii"))
         return instructions
 
@@ -590,7 +613,8 @@ class RelayClient(RelayConfig):
             "listening_port": self.PORT,
             "final_dst": final_dst_for_exit,
             "ttl": ttl,
-            "native": int(native)
+            "native": int(native),
+            "hop_id": self.get_hop_id(self.hops[0])
         })
         try:
             conn = socket.create_connection((self.hops[0], self.ra_port), timeout=10)
@@ -628,7 +652,8 @@ class RelayClient(RelayConfig):
             )
 
         if decrypted_msg.get("error_code") == 9: # HOP that failed
-            decrypted_msg['@sys_next_hop'] = self.next_after(self.hops, decrypted_msg.get('hop_id'))
+            hop = self.get_hop_from_hop_id(decrypted_msg.get('hop_id'))
+            decrypted_msg['@sys_next_hop'] = self.next_after(self.hops, hop)
             self.failed_hops.add(decrypted_msg['@sys_next_hop'])
 
         if decrypted_msg.get("status"):
