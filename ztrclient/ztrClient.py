@@ -175,7 +175,7 @@ class RelayConfig:
     def ra_port(self):
         """ This is the port to controll a hop"""
         return self.settings("ra_port")
-
+    
     def get_chain(self):
         try:
             chain = self.config["chain"]
@@ -198,7 +198,21 @@ class RelayConfig:
                 raise ConfigError(f"couldn't write cached pubkey for hop {address}: {e}") from e
             l.append(address)
         return l
+    
+    def get_ra_keys(self):
+        return self.settings("encryptions")["ra"]
 
+    def get_e2e_keys(self):
+        # with_encryption lives at the top level of the config, a sibling of
+        # hop_settings (same as `services` above it) -- not under
+        # hop_settings itself, so this reads self.config directly rather
+        # than going through settings(), which is hardcoded to look inside
+        # hop_settings.
+        try:
+            return self.config["with_encryption"]["encryptions"]
+        except KeyError as e:
+            raise ConfigFieldError("missing with_encryption.encryptions in this .ztr config") from e
+    
 def recv_exact(sock: socket.socket, length: int) -> bytes:
     """Helper function to reliably read an exact number of bytes from a socket."""
     data = bytearray()
@@ -359,12 +373,13 @@ class RelayClient(RelayConfig):
         self.hops.pop()
 
         try:
+            ra_keys = self.get_ra_keys()
             self.crypt = CryptBot(
-                pathPrivateKey=f"{self.SCRIPT_DIR}/privateKey.pem",
-                pathPublicKey=f"{self.SCRIPT_DIR}/publicKey.pem",
+                pathPrivateKey=f"{self.SCRIPT_DIR}/{ra_keys['private_key']}",
+                pathPublicKey=f"{self.SCRIPT_DIR}/{ra_keys['public_key']}",
                 pathRecipientPublicKey=self.proxy_pub_path(self.hops[0])
             )
-            self.crypt.create_keys(rsa_size=2048, reuse=True)
+            self.crypt.create_keys(rsa_size=ra_keys['rsa_size'], reuse=True)
         except Exception as e:
             self.logger.error(f"local keypair setup failed: {e}")
             raise CryptoError(f"couldn't set up local keypair: {e}") from e
@@ -551,12 +566,13 @@ class RelayClient(RelayConfig):
         """
         self.we_recipient_pubkey_path = recipient_pubkey_path
         try:
+            e2e_keys = self.get_e2e_keys()
             self._e2e_crypt = CryptBot(
-                pathPrivateKey=own_private_key or f"{self.SCRIPT_DIR}/e2ePrivateKey.pem",
-                pathPublicKey=own_public_key or f"{self.SCRIPT_DIR}/e2ePublicKey.pem",
+                pathPrivateKey=own_private_key or f"{self.SCRIPT_DIR}/{e2e_keys['private_key']}",
+                pathPublicKey=own_public_key or f"{self.SCRIPT_DIR}/{e2e_keys['public_key']}",
                 pathRecipientPublicKey=recipient_pubkey_path,
             )
-            self._e2e_crypt.create_keys(rsa_size=2048, reuse=True)
+            self._e2e_crypt.create_keys(rsa_size=e2e_keys['rsa_size'], reuse=True)
         except Exception as e:
             raise CryptoError(f"couldn't set up end-to-end encryption keypair: {e}") from e
         self.secure_transport = True
