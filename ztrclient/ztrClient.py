@@ -347,10 +347,11 @@ class RelayClient(RelayConfig):
     end-state payload for the target.
     """
 
-    def __init__(self, target_host: str, port: int = None, db_name: str = "pr.db", debug=False, config_file = None):
+    def __init__(self, target_host: str, port: int = None, db_name: str = "pr.db", debug=False, config_file = None, transport_type: str = "tcp"):
         super().__init__(config_file=config_file)
         self.tunnel_cache = TunnelCache()
         self.TARGET_HOST = target_host
+        self.transport_type = transport_type
         # Needs self.tunnel_cache and settings() (from super().__init__()
         # above) already in place, so this can't move any earlier.
         if port is None:
@@ -404,12 +405,12 @@ class RelayClient(RelayConfig):
         """Picks the least-used port from hop_settings.services_ports (random
         tiebreak), based on local tunnel_cache.db — not the entry hop's real
         traffic, which this can't see."""
-        candidates = self.settings("services_ports")
+        candidates = self.settings("services_ports")[self.transport_type]
         if not isinstance(candidates, list) or not candidates:
-            raise ConfigFieldError("hop_settings.services_ports must be a non-empty list to auto-select a port")
+            raise ConfigFieldError(f"hop_settings.services_ports.{self.transport_type} must be a non-empty list to auto-select a port")
         usage = self.tunnel_cache.port_usage_counts(candidates)
         least = min(usage.values())
-        least_used_ports = [p for p, count in usage.items() if count == least]
+        least_used_ports = [p for p, count in usage.items() if count == least and p is not None]
         return random.choice(least_used_ports)
 
     def set_target_port(self,port: int):
