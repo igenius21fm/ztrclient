@@ -24,14 +24,20 @@ git clone https://github.com/igenius21fm/ztrclient.git
 cd ztrclient/ztrclient
 ```
 
-or grab a specific [release](https://github.com/igenius21fm/ztrclient/releases)
-zip instead, if you'd rather pin a version than track `main`:
+or grab a [release](https://github.com/igenius21fm/ztrclient/releases) zip
+instead, if you'd rather pin a version than track `main` — this grabs
+whichever's currently latest:
 
 ```bash
-curl -LO https://github.com/igenius21fm/ztrclient/releases/download/v1.0.2/ztrclient-v1.0.2.zip
-unzip ztrclient-v1.0.2.zip
+ZTR_VERSION=$(curl -s https://api.github.com/repos/igenius21fm/ztrclient/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -LO "https://github.com/igenius21fm/ztrclient/releases/download/${ZTR_VERSION}/ztrclient-${ZTR_VERSION}.zip"
+unzip "ztrclient-${ZTR_VERSION}.zip"
 cd ztrclient
 ```
+
+To pin an exact version instead, replace `${ZTR_VERSION}` with a tag from
+the [releases page](https://github.com/igenius21fm/ztrclient/releases)
+directly.
 
 Then run the installer:
 
@@ -178,7 +184,9 @@ in for you.
 → Stuck here? See [The config file](#the-config-file).
 
 **5. Run it.** Easiest: use one of the plugin wrappers directly — after
-step 1, these are already on your `PATH`:
+step 1, these are already on your `PATH`. See
+[plugins/README.md](ztrclient/plugins/README.md) for what `ztr_ssh` and its siblings
+(`ztr_forward`, `ztr_pg`) each actually do, flag by flag:
 
 ```bash
 ztr_ssh --rh "example._ztr" --rp 22
@@ -189,7 +197,7 @@ Or, writing your own script against `RelayClient` directly:
 ```python
 from ztrClient import RelayClient
 
-client = RelayClient(target_host="example._ztr", port=22, config_file="<name>.ztr")
+client = RelayClient(target_host="example._ztr", config_file="<name>.ztr")
 result = client.set_tunnel()
 if result and result.get("status"):
     print("Tunnel established:", client.session_id)
@@ -197,8 +205,11 @@ else:
     print("Failed to establish tunnel:", result)
 ```
 
-run with the venv's interpreter, same as everything else here:
-`~/.local/share/ztr/venv/bin/python3 your_script.py`.
+`port` is optional — omit it (as above) and `RelayClient` picks one itself
+from the route's available list; see [routes/README.md](ztrclient/routes/README.md)
+for exactly how. Pass one explicitly (`port=22`) only if you have a reason
+to pin a specific lane. Run either way with the venv's interpreter, same as
+everything else here: `~/.local/share/ztr/venv/bin/python3 your_script.py`.
 
 ## Troubleshooting
 
@@ -280,10 +291,11 @@ traceback.
 ./installer-linux.sh --uninstall
 ```
 
-Removes the symlinked wrappers, the venv, the background service (if any),
-the PATH/alias lines from your rc file, and the dummy IP/interface (if any)
-— everything the installer added, and nothing else. Your `routes/` folder
-and any `.ztr` configs in it are left alone.
+Removes the symlinked wrappers, the venv, whichever background services were
+set up (the tunnel service, the dashboard, or both), the PATH/alias lines
+from your rc file, and the dummy IP/interface (if any) — everything the
+installer added, and nothing else. Your `routes/` folder and any `.ztr`
+configs in it are left alone.
 
 ## Layout
 
@@ -294,13 +306,16 @@ and any `.ztr` configs in it are left alone.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_tunnel_lp.py` (the
   persistent tunnel service target), and `ztr_dashboard.py` (the local
   tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
-  build step).
+  build step). See [plugins/README.md](ztrclient/plugins/README.md) for what each one
+  actually does — the shared control-port protocol, every flag, and real
+  usage examples.
 - `utils/crypt_bot.py` — RSA/AES helper used for signing and encrypting
   messages to the relay.
 - `routes/` — where your downloaded `.ztr` route configs go (see
-  [Getting connected](#getting-connected)). Ships empty (aside from its own
-  README) — the installer's `mkdir -p` would create it anyway, but it's
-  here from the start so it's not a surprise.
+  [Getting connected](#getting-connected)). Ships empty aside from its own
+  [README](ztrclient/routes/README.md), which documents every field in a `.ztr`
+  config — the installer's `mkdir -p` would create the folder anyway, but
+  it's here from the start so it's not a surprise.
 - `installer-linux.sh` — see [Install](#install).
 
 ## Example apps
