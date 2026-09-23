@@ -23,6 +23,14 @@
 # up forever. This script removes its own entry on exit (ssh-keygen -R)
 # unless you pass --keep-host-key.
 #
+# The other side of that same fresh-host-every-time coin: ssh also *asks*
+# to verify each one interactively before connecting. The first time this
+# script resolves a non-127.0.0.1 local_ip, it offers (once — declining is
+# remembered) to add a Host block to ~/.ssh/config scoped to exactly that
+# address, with StrictHostKeyChecking accept-new, so that prompt goes away
+# for ztr_ssh sessions specifically without touching how ssh treats any
+# other host. See maybe_offer_hostkey_config() below for the reasoning.
+#
 # Tip: alias it in your shell rc so you can just type `ztr_ssh` from
 # anywhere instead of the full path — e.g. in ~/.zshrc:
 #   alias ztr_ssh="/path/to/package/ztr-client/plugins/ztr_ssh"
@@ -94,6 +102,82 @@ control_request() {
   printf '%s' "$response"
 }
 
+SSH_CONFIG="${HOME}/.ssh/config"
+ZTR_KNOWN_HOSTS="${HOME}/.ssh/known_hosts_ztr"
+ZTR_HOSTKEY_DECLINED_MARKER="${HOME}/.ssh/.ztr_ssh_hostkey_declined"
+
+# Offers to add a Host block for $1 (the session's actual local_ip) so ssh
+# stops asking "are you sure you want to continue connecting?" on every
+# single invocation. Every session binds to the same local_ip with a
+# different ephemeral port (see ztr_tunnel_lp.py's module docstring), so
+# from ssh's point of view that's a brand-new, never-before-seen host every
+# time — StrictHostKeyChecking accept-new silences exactly that "first time
+# seeing this [host]:port" prompt and nothing else. It does NOT weaken what
+# actually gets verified: the real host-key exchange happens end-to-end
+# with the real remote target, carried through the tunnel untouched — this
+# only touches whether a local, already-ephemeral, already-cleaned-up-on-
+# exit known_hosts entry needs a human to click through first.
+#
+# Skipped entirely for a bare 127.0.0.1 local_ip (the --local-ip 127.0.0.1
+# fallback, see ztr_tunnel_lp.py) — that address is shared with unrelated
+# local services, so it's not this script's place to change how ssh treats
+# it. Also skipped if the user already has their own Host block for this
+# address (never overwritten), if they declined once before (remembered via
+# $ZTR_HOSTKEY_DECLINED_MARKER, so this doesn't nag every run), or if
+# stdin/stderr aren't an actual terminal (nothing to prompt against).
+maybe_offer_hostkey_config() {
+  local ip="$1"
+
+  if [[ "$ip" == "127.0.0.1" ]]; then
+    return
+  fi
+  if [[ -f "$SSH_CONFIG" ]] && grep -qE "^[[:space:]]*Host[[:space:]]+${ip//./\\.}([[:space:]]|\$)" "$SSH_CONFIG"; then
+    return
+  fi
+  if [[ -f "$ZTR_HOSTKEY_DECLINED_MARKER" ]]; then
+    return
+  fi
+  if [[ ! -t 0 || ! -t 2 ]]; then
+    return
+  fi
+
+  log_info "ssh will ask you to verify a 'new' host every single ztr_ssh session,"
+  log_info "since each one gets a fresh ephemeral port on ${ip}. Add this to"
+  log_info "${SSH_CONFIG} to skip that prompt for ztr_ssh sessions specifically"
+  log_info "(this doesn't weaken the real host-key check against your actual"
+  log_info "target — that still happens end-to-end through the tunnel):"
+  log_dim  "  Host ${ip}"
+  log_dim  "      StrictHostKeyChecking accept-new"
+  log_dim  "      UserKnownHostsFile ${ZTR_KNOWN_HOSTS}"
+  local reply=""
+  read -r -p "[ztr_ssh] Add it now? [y/N] " reply
+
+  # Both branches write into ~/.ssh (the config itself, or just the
+  # declined-marker) — ensured here once rather than duplicated per branch.
+  mkdir -p "${HOME}/.ssh"
+  chmod 700 "${HOME}/.ssh"
+
+  if [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+    touch "$SSH_CONFIG"
+    chmod 600 "$SSH_CONFIG"
+    {
+      echo ""
+      echo "# Added by ztr_ssh — skips the repeat host-key prompt for its own"
+      echo "# tunnel sessions only (fresh ephemeral port each time on ${ip})."
+      echo "Host ${ip}"
+      echo "    StrictHostKeyChecking accept-new"
+      echo "    UserKnownHostsFile ${ZTR_KNOWN_HOSTS}"
+    } >> "$SSH_CONFIG"
+    log_ok "done — future ztr_ssh sessions won't prompt for this."
+  else
+    touch "$ZTR_HOSTKEY_DECLINED_MARKER"
+    log_dim "skipped — won't ask again. Add it yourself later if you change your mind:"
+    log_dim "  Host ${ip}"
+    log_dim "      StrictHostKeyChecking accept-new"
+    log_dim "      UserKnownHostsFile ${ZTR_KNOWN_HOSTS}"
+  fi
+}
+
 SESSION_ID=""
 LOCAL_IP=""
 LOCAL_PORT=""
@@ -158,6 +242,7 @@ if [[ "$OK" != "True" ]]; then
 fi
 
 log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), connecting ssh ..."
+maybe_offer_hostkey_config "$LOCAL_IP"
 ssh "${SSH_ARGS[@]}" -p "$LOCAL_PORT" "$LOCAL_IP"
 SSH_EXIT=$?
 exit "$SSH_EXIT"
