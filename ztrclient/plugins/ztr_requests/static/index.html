@@ -22,6 +22,9 @@
   <symbol id="icon-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M18 8H6a2 2 0 0 0-2 2v1a8 8 0 0 0 16 0V10a2 2 0 0 0-2-2Z"/></symbol>
   <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
   <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="icon-user" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+  <symbol id="icon-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></symbol>
+  <symbol id="icon-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
 </svg>
 
 <datalist id="headerNameOptions">
@@ -76,6 +79,15 @@
           <input class="form-check-input" type="checkbox" id="withTimingDefense">
           <label class="form-check-label" for="withTimingDefense">Timing-correlation defense</label>
         </div>
+        <label class="field-label" for="timeoutInput">Timeout (seconds) <span class="hint">defaults to 30</span></label>
+        <input class="field-input" id="timeoutInput" type="number" min="1" step="any" placeholder="30">
+
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="verifyTls" checked>
+          <label class="form-check-label" for="verifyTls">Verify TLS certificate</label>
+        </div>
+        <label class="field-label" for="clientCertPath">Client certificate path <span class="hint">optional</span></label>
+        <input class="field-input" id="clientCertPath" type="text" placeholder="/path/to/client.pem" autocomplete="off">
       </details>
     </section>
 
@@ -107,6 +119,7 @@
     <section class="side-section sidebar-panels">
       <div class="side-tabs" id="sidebarTabs">
         <button class="side-tab active" data-side="history">History</button>
+        <button class="side-tab" data-side="batch">Batch</button>
         <button class="side-tab" data-side="saved">Saved</button>
         <button class="side-tab" data-side="conns">Conns</button>
       </div>
@@ -118,6 +131,15 @@
           </button>
         </div>
         <div id="historyList" class="history-list"></div>
+      </div>
+
+      <div class="side-panel" id="side-batch">
+        <div class="side-panel-toolbar">
+          <button class="icon-btn" id="refreshBatchBtn" title="Refresh" aria-label="Refresh">
+            <svg class="icon"><use href="#icon-plug"></use></svg>
+          </button>
+        </div>
+        <div id="batchRunsList" class="history-list"></div>
       </div>
 
       <div class="side-panel" id="side-saved">
@@ -153,6 +175,20 @@
       </button>
       <button id="sendBtn" class="send-btn">
         <svg class="icon"><use href="#icon-send"></use></svg> Send
+      </button>
+    </div>
+
+    <div class="batch-bar" id="batchBar">
+      <label class="ghost-btn small" for="queryFileInput" title="A .txt file, one query per line. Reference it in the URL, a header value, or the body as $$QF$$ to fire one request per line.">
+        Query file&hellip;
+      </label>
+      <input type="file" id="queryFileInput" accept=".txt,text/plain" style="display:none">
+      <span class="batch-file-chip" id="batchFileChip"></span>
+      <button type="button" class="icon-btn" id="clearQueryFileBtn" title="Remove query file" aria-label="Remove query file" style="display:none">
+        <svg class="icon"><use href="#icon-x"></use></svg>
+      </button>
+      <button type="button" class="icon-btn" id="qfHelpBtn" title="$$QF$$ syntax help" aria-label="$$QF$$ syntax help">
+        <svg class="icon"><use href="#icon-help"></use></svg>
       </button>
     </div>
 
@@ -210,6 +246,10 @@
     </div>
 
     <section class="response-panel">
+      <div class="batch-progress" id="batchProgress" style="display:none">
+        <span class="batch-progress-text" id="batchProgressText"></span>
+        <button type="button" class="ghost-btn small" id="batchStopBtn">Stop</button>
+      </div>
       <div class="response-meta" id="responseMeta">
         <span class="status-pill idle" id="statusPill">Ready</span>
         <span class="response-stat" id="timingStat"></span>
@@ -233,6 +273,9 @@
         <div class="response-image-wrap" id="responseImageWrap" style="display:none">
           <img class="response-image" id="responseImage" alt="Response image">
         </div>
+        <div class="response-image-wrap" id="responseVideoWrap" style="display:none">
+          <video class="response-video" id="responseVideo" controls></video>
+        </div>
       </div>
       <div class="tab-panel" id="rtab-headers">
         <div class="headers-section-label">Request</div>
@@ -242,15 +285,70 @@
         <pre class="response-body" id="responseHeaders"></pre>
       </div>
       <div class="tab-panel" id="rtab-security">
-        <div class="tls-cert-card" id="routeInfoCard" style="display:none"></div>
-        <div class="tls-cert-card" id="tlsCertCard" style="display:none"></div>
-        <div class="security-view" id="responseSecurity">Send a request to see its headers analyzed here.</div>
+        <div class="security-scroll" id="securityScroll">
+          <div class="tls-cert-card" id="routeInfoCard" style="display:none"></div>
+          <div class="tls-cert-card" id="tlsCertCard" style="display:none"></div>
+          <div class="security-view" id="responseSecurity">Send a request to see its headers analyzed here.</div>
+        </div>
       </div>
       <div class="tab-panel" id="rtab-metadata">
         <div class="metadata-view" id="responseMetadata"></div>
       </div>
     </section>
   </main>
+</div>
+
+<div class="modal-overlay" id="qfHelpOverlay" style="display:none">
+  <div class="modal-card qf-help-card" role="dialog" aria-modal="true" aria-labelledby="qfHelpTitle">
+    <div class="modal-header">
+      <h3 id="qfHelpTitle">$$QF$$ batch syntax</h3>
+      <button type="button" class="icon-btn" id="qfHelpCloseBtn" title="Close" aria-label="Close">
+        <svg class="icon"><use href="#icon-x"></use></svg>
+      </button>
+    </div>
+    <div class="modal-body qf-help-body">
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Substitution</div>
+        <p>Attach a <code>.txt</code> query file — one value per line — with the <strong>Query file&hellip;</strong> button. Put <code>$$QF$$</code> anywhere in the URL, a header value, or the body, then Send fires one request per line, replacing every <code>$$QF$$</code> with that line's value.</p>
+        <pre class="qf-example">https://api.example.com/search?q=$$QF$$</pre>
+      </section>
+
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Stop condition</div>
+        <p><code>$$QF::&lt;...&gt;$$</code> stops the whole run the moment a response matches the condition inside the brackets.</p>
+        <pre class="qf-example">$$QF::&lt;code=500&gt;$$</pre>
+      </section>
+
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Conditions</div>
+        <table class="qf-help-table">
+          <tr><td><code>code=200</code></td><td>Response status code equals 200.</td></tr>
+          <tr><td><code>body_contains=['kw1','kw2']</code></td><td>Response body contains any of these keywords (case-insensitive).</td></tr>
+          <tr><td><code>headers[Name]=value</code></td><td>Response header <code>Name</code> contains <code>value</code> (case-insensitive). Quote the value if it has spaces: <code>headers[Content-Type]="application/json"</code>.</td></tr>
+        </table>
+      </section>
+
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Operators</div>
+        <p><code>code</code> and <code>headers[Name]</code> both accept <code>=</code>, <code>!=</code>, <code>&gt;=</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&lt;</code> instead of just <code>=</code>. For <code>code</code> the comparison is always numeric. For <code>headers[Name]</code>, <code>=</code> / <code>!=</code> stay a case-insensitive contains / doesn't-contain check; the four ordering operators (<code>&gt;= &lt;= &gt; &lt;</code>) compare the header's value as a number, and never match if it isn't one.</p>
+        <pre class="qf-example">$$QF::&lt;code&gt;=400 AND code&lt;500&gt;$$</pre>
+        <pre class="qf-example">$$QF::&lt;headers[content-length]&gt;1000&gt;$$</pre>
+      </section>
+
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Combining conditions</div>
+        <p>Combine conditions with <code>AND</code> / <code>OR</code> (either case) and parentheses. <code>AND</code> binds tighter than <code>OR</code>, same as most languages — group with parens when you need to be explicit.</p>
+        <pre class="qf-example">$$QF::&lt;code=200 AND headers[key]=something&gt;$$</pre>
+        <pre class="qf-example">$$QF::&lt;(code=200 AND headers[key]=something) OR code=500&gt;$$</pre>
+      </section>
+
+      <section class="qf-help-section">
+        <div class="side-eyebrow">Save only matches &mdash; ::om</div>
+        <p>Add <code>::om</code> right after the closing <code>&gt;</code> to change what the condition does: instead of stopping the run, every line still runs, but only the lines whose response matches get saved to the <strong>Batch</strong> tab.</p>
+        <pre class="qf-example">$$QF::&lt;code=200 AND body_contains=['ready']&gt;::om$$</pre>
+      </section>
+    </div>
+  </div>
 </div>
 
 <script src="/static/vendor/jquery.min.js"></script>

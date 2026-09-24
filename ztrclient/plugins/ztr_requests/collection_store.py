@@ -42,7 +42,18 @@ class CollectionStore:
                 )
                 """
             )
+            self._migrate(conn)
             conn.commit()
+
+    # New columns added after the table already existed on deployed
+    # instances — CREATE TABLE IF NOT EXISTS above is a no-op against an
+    # existing table, so a real ALTER TABLE is the only way an already
+    # -running install picks these up, hence the guarded, idempotent add.
+    def _migrate(self, conn):
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(collection)")}
+        for col, decl in (("timeout", "REAL"), ("verify", "INTEGER"), ("client_cert", "TEXT")):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE collection ADD COLUMN {col} {decl}")
 
     def add(self, entry: dict) -> int:
         with self._get_connection() as conn:
@@ -51,8 +62,9 @@ class CollectionStore:
                 INSERT INTO collection (
                     name, created_at, method, url, headers, body,
                     target_host, target_port, config_file, worker_count,
-                    with_encryption, recipient_pubkey_path, with_timing_defense
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    with_encryption, recipient_pubkey_path, with_timing_defense,
+                    timeout, verify, client_cert
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.get("name") or "Untitled request",
@@ -68,6 +80,12 @@ class CollectionStore:
                     1 if entry.get("with_encryption") else 0,
                     entry.get("recipient_pubkey_path"),
                     1 if entry.get("with_timing_defense") else 0,
+                    entry.get("timeout"),
+                    # verify defaults True (matches ztr_https.Session's own
+                    # default), so a missing/None value has to be stored as
+                    # 1, not "whatever falsy 1-if-x-else-0 would give None".
+                    1 if entry.get("verify", True) else 0,
+                    entry.get("client_cert"),
                 ),
             )
             conn.commit()
@@ -93,4 +111,9 @@ class CollectionStore:
             d["headers"] = {}
         d["with_encryption"] = bool(d.get("with_encryption"))
         d["with_timing_defense"] = bool(d.get("with_timing_defense"))
+        # NULL here means "saved before this column existed", not "verify
+        # was turned off" — bool(None) would silently flip every
+        # pre-existing saved request to unverified the moment it's
+        # reloaded, which is the opposite of what nobody asked for.
+        d["verify"] = True if d.get("verify") is None else bool(d.get("verify"))
         return d

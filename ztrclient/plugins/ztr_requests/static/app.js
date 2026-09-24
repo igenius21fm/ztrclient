@@ -10,6 +10,20 @@ $(function () {
     return $('<div>').text(str == null ? '' : str).html();
   }
 
+  function formatBytes(n) {
+    n = Number(n);
+    if (!isFinite(n) || n < 0) return '';
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = n;
+    let unit = -1;
+    do {
+      value /= 1024;
+      unit++;
+    } while (value >= 1024 && unit < units.length - 1);
+    return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+  }
+
   function statusPillClass(result) {
     if (!result) return 'idle';
     if (!result.ok && !result.status_code) return 'errnet';
@@ -92,11 +106,31 @@ $(function () {
   $(document).on('click', '#paramRows .header-remove', () => { updateParamCount(); syncUrlFromParams(); });
   $('#addParamBtn').on('click', () => addParamRow('', ''));
 
+  // URLSearchParams.toString() percent-encodes characters — $ { } < > [ ]
+  // ' " : , = — that are perfectly legal, unambiguous in a URL query
+  // string. Left alone, that silently breaks a $$QF$$/$$QF::<...>$$/
+  // {{var}} token the moment its param round-trips through this tab (type
+  // $$QF$$ into a param value, tab out, and it becomes %24%24QF%24%24 —
+  // containsQF() then can't find it anymore; the stop spec's own
+  // "code=500" syntax needs literal "=" for the same reason). None of
+  // these are top-level query-string delimiters (& and, for parsing, the
+  // FIRST = in each pair) — URLSearchParams itself only splits each pair
+  // on its first "=", so a later literal "=" in the value round-trips
+  // unambiguously. Space stays encoded (as "+"): unlike these, a literal
+  // space is actually invalid in the real outgoing request line.
+  const QUERY_SAFE_RESTORE = {
+    '%24': '$', '%7B': '{', '%7D': '}', '%3C': '<', '%3E': '>',
+    '%5B': '[', '%5D': ']', '%27': "'", '%22': '"', '%3A': ':', '%2C': ',', '%3D': '=',
+  };
+  function restoreQuerySafeChars(qs) {
+    return qs.replace(/%24|%7B|%7D|%3C|%3E|%5B|%5D|%27|%22|%3A|%2C|%3D/g, (seq) => QUERY_SAFE_RESTORE[seq]);
+  }
+
   function syncUrlFromParams() {
     if (syncingParams) return;
     const params = collectKVRows($('#paramRows'));
     const [base] = $('#urlInput').val().split('?');
-    const qs = new URLSearchParams(params).toString();
+    const qs = restoreQuerySafeChars(new URLSearchParams(params).toString());
     syncingParams = true;
     $('#urlInput').val(qs ? `${base}?${qs}` : base);
     syncingParams = false;
@@ -305,16 +339,17 @@ $(function () {
     $('#rtab-' + tab).addClass('active');
   });
 
-  // ---------------- Sidebar tabs (History / Saved / Conns) ----------------
+  // ---------------- Sidebar tabs (History / Batch / Saved / Conns) ----------------
 
   $('#sidebarTabs .side-tab').on('click', function () {
     const side = $(this).data('side');
     $('#sidebarTabs .side-tab').removeClass('active');
     $(this).addClass('active');
-    $('#side-history, #side-saved, #side-conns').removeClass('active');
+    $('#side-history, #side-batch, #side-saved, #side-conns').removeClass('active');
     $('#side-' + side).addClass('active');
     if (side === 'saved') loadSaved();
     if (side === 'conns') loadPools();
+    if (side === 'batch') loadBatchRuns();
   });
 
   // ---------------- Method select coloring ----------------
@@ -399,6 +434,90 @@ $(function () {
     });
   }
 
+  // ---------------- Batch (full detail for $$QF$$ runs) ----------------
+  //
+  // History only ever kept a thin summary row per request, so once a batch
+  // run finished, every line but the last had its full response (headers,
+  // cookies, TLS info, relay path, metadata) gone for good. Each line here
+  // is loaded on demand from BatchStore's own row, which keeps everything
+  // /api/send returns — so any past line can be reopened in full, not just
+  // the most recent one.
+
+  function loadBatchRuns() {
+    $.get('/api/batch/runs').done((res) => {
+      const $list = $('#batchRunsList');
+      $list.empty();
+      if (!res.runs || !res.runs.length) {
+        $list.append('<div class="history-empty">No batch runs yet — attach a query file and send a $$QF$$ request.</div>');
+        return;
+      }
+      res.runs.forEach((run) => {
+        const cls = run.ok_count === run.total ? 'ok2xx' : (run.ok_count === 0 ? 'err5xx' : 'warn4xx');
+        const label = run.url_template ? escapeHtml(run.url_template) : '(no url)';
+        const $row = $(`
+          <div class="history-item batch-run-item" title="${label}">
+            <span class="history-method method-${escapeHtml(run.method || 'GET')}">${escapeHtml(run.method || 'GET')}</span>
+            <span class="history-url">${label}</span>
+            <span class="history-status status-pill ${cls}">${run.ok_count}/${run.total}</span>
+            <button type="button" class="list-item-remove" title="Delete run"><svg class="icon"><use href="#icon-x"></use></svg></button>
+          </div>
+        `);
+        const $lines = $(`<div class="batch-run-lines" style="display:none"></div>`);
+
+        $row.on('click', (e) => {
+          if ($(e.target).closest('.list-item-remove').length) return;
+          if ($lines.is(':visible')) { $lines.hide(); return; }
+          $lines.show();
+          if ($lines.data('loaded')) return;
+          $lines.data('loaded', true);
+          $lines.html('<div class="history-empty">Loading…</div>');
+          $.get('/api/batch/requests', { run_id: run.run_id }).done((lres) => {
+            $lines.empty();
+            (lres.requests || []).forEach((line) => {
+              const lcls = statusPillClass(line);
+              const $lrow = $(`
+                <div class="history-item batch-line-item" title="${escapeHtml(line.url)}">
+                  <span class="history-status status-pill ${lcls}">${escapeHtml(statusPillText(line))}</span>
+                  <span class="history-url">${escapeHtml(line.line_value != null ? line.line_value : line.url)}</span>
+                </div>
+              `);
+              $lrow.on('click', () => {
+                $.get('/api/batch/request', { run_id: run.run_id, line_index: line.line_index }).done((row) => {
+                  renderBatchRow(row);
+                });
+              });
+              $lines.append($lrow);
+            });
+          });
+        });
+
+        $row.find('.list-item-remove').on('click', (e) => {
+          e.stopPropagation();
+          if (!confirm('Delete this batch run?')) return;
+          $.ajax({ url: '/api/batch/runs?run_id=' + encodeURIComponent(run.run_id), method: 'DELETE' }).done(loadBatchRuns);
+        });
+
+        $list.append($row).append($lines);
+      });
+    });
+  }
+
+  // Batch rows never keep the video bytes themselves (a video response is
+  // aborted right after its headers, same as a live request) and, unlike
+  // History, don't retain a config_file to re-open a live /api/stream with
+  // — so a stored video line shows what's known about it instead of trying
+  // to play a stream it structurally can't reconstruct.
+  function renderBatchRow(row) {
+    if (row.is_video) {
+      const note = `(video response — ${escapeHtml(row.content_type || 'unknown type')}, not replayable from Batch)`;
+      renderResponse(Object.assign({}, row, { is_video: false, body: note }), row.request_headers);
+      return;
+    }
+    renderResponse(row, row.request_headers);
+  }
+
+  $('#refreshBatchBtn').on('click', loadBatchRuns);
+
   function loadEntryIntoComposer(item) {
     $('#methodSelect').val(item.method).trigger('change');
     $('#urlInput').val(item.url);
@@ -406,6 +525,11 @@ $(function () {
     if (item.config_file) $('#routeSelect').val(item.config_file);
     $('#targetPort').val(item.target_port || '');
     $('#withTimingDefense').prop('checked', !!item.with_timing_defense);
+    $('#timeoutInput').val(item.timeout || '');
+    // verify defaults to true — an entry saved before this option existed
+    // (item.verify undefined) must NOT silently reload as "unverified".
+    $('#verifyTls').prop('checked', item.verify !== false);
+    $('#clientCertPath').val(item.client_cert || '');
 
     // Auth isn't part of a saved/history entry (it's folded into headers at
     // send time) — reset it so a Bearer/Basic setup from a previous request
@@ -433,6 +557,7 @@ $(function () {
     $('#urlInput').val('');
     $('#paramRows').empty();
     updateParamCount();
+    $('#batchProgress').hide();
 
     $('#authType').val('none').trigger('change');
     $('#authBearerToken').val('');
@@ -485,7 +610,10 @@ $(function () {
         return;
       }
       res.sessions.forEach((p) => {
-        const flags = p.with_timing_defense ? 'timing-defense' : 'plain';
+        const flagParts = [p.with_timing_defense ? 'timing-defense' : 'plain'];
+        if (p.verify === false) flagParts.push('TLS unverified');
+        if (p.client_cert) flagParts.push('client cert');
+        const flags = flagParts.join(' · ');
         const origins = p.origins && p.origins.length ? p.origins.join(', ') : 'no open connections yet';
         const $row = $(`
           <div class="pool-row">
@@ -524,6 +652,9 @@ $(function () {
       config_file: $('#routeSelect').val(),
       target_port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),
+      timeout: parseFloat($('#timeoutInput').val()) || undefined,
+      verify: $('#verifyTls').is(':checked'),
+      client_cert: $('#clientCertPath').val().trim() || undefined,
     };
   }
 
@@ -612,21 +743,82 @@ $(function () {
 
   // ---------------- Relay path (exit-hop identity) ----------------
 
+  function truncateMiddle(str, max) {
+    if (!str) return '';
+    if (str.length <= max) return str;
+    const half = Math.floor((max - 1) / 2);
+    return str.slice(0, half) + '…' + str.slice(str.length - half);
+  }
+
+  function currentTargetHost() {
+    try {
+      return new URL(substituteVars($('#urlInput').val().trim())).hostname;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // A horizontal node-and-arrow diagram (You -> each configured hop ->
+  // Target) instead of a plain key/value list — the hop chain is a path,
+  // and a path reads more clearly as one than as rows in a table. Built
+  // as one inline SVG so it can pull icons straight from this page's own
+  // sprite (<use href="#icon-...">) and pick up the same CSS custom
+  // properties (light/dark, accent) the rest of the app already uses,
+  // rather than a separate image asset that would need its own theming.
   function renderRouteInfoCard(routeInfo) {
     const $card = $('#routeInfoCard');
     if (!routeInfo || !routeInfo.hops || !routeInfo.hops.length) {
       $card.hide().empty();
       return;
     }
-    const $dl = $('<dl class="tls-cert-grid"></dl>');
-    routeInfo.hops.forEach((h) => {
-      const label = h.role ? h.role.charAt(0).toUpperCase() + h.role.slice(1) : `Hop ${h.hop}`;
-      const value = h.status && h.status !== 'online' ? `${h.address} (${h.status})` : (h.address || '?');
-      $dl.append(`<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`);
+
+    const nodes = [
+      { title: 'You', sub: '', icon: 'icon-user', kind: 'endpoint' },
+      ...routeInfo.hops.map((h) => ({
+        title: h.role ? h.role.charAt(0).toUpperCase() + h.role.slice(1) : `Hop ${h.hop}`,
+        sub: h.address || '?',
+        full: h.address || '',
+        icon: 'icon-lock',
+        kind: h.status && h.status !== 'online' ? 'warn' : 'hop',
+      })),
+      { title: 'Target', sub: currentTargetHost(), icon: 'icon-globe', kind: 'endpoint' },
+    ];
+
+    const BOX_W = 128;
+    const BOX_H = 60;
+    const GAP = 40;
+    const PAD_X = 18;
+    const PAD_Y = 14;
+    const totalW = nodes.length * BOX_W + (nodes.length - 1) * GAP + PAD_X * 2;
+    const totalH = BOX_H + PAD_Y * 2;
+    const cy = PAD_Y + BOX_H / 2;
+
+    let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" class="route-diagram" xmlns="http://www.w3.org/2000/svg">`;
+    svg += '<defs><marker id="routeArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 Z" class="route-arrow-head"/></marker></defs>';
+
+    nodes.forEach((n, i) => {
+      const x = PAD_X + i * (BOX_W + GAP);
+      if (i > 0) {
+        const prevRight = PAD_X + (i - 1) * (BOX_W + GAP) + BOX_W;
+        svg += `<line x1="${prevRight}" y1="${cy}" x2="${x}" y2="${cy}" class="route-edge" marker-end="url(#routeArrow)" />`;
+      }
+      const cls = `route-node route-node-${n.kind}`;
+      const subText = escapeHtml(truncateMiddle(n.sub, 17));
+      const titleAttr = n.full && n.full !== n.sub ? `<title>${escapeHtml(n.full)}</title>` : '';
+      svg += `
+        <g class="${cls}">
+          ${titleAttr}
+          <rect x="${x}" y="${PAD_Y}" width="${BOX_W}" height="${BOX_H}" rx="9" />
+          <use href="#${n.icon}" class="route-node-icon" x="${x + BOX_W / 2 - 8}" y="${PAD_Y + 8}" width="16" height="16" />
+          <text x="${x + BOX_W / 2}" y="${PAD_Y + 42}" text-anchor="middle" class="route-node-title">${escapeHtml(n.title)}</text>
+          ${n.sub ? `<text x="${x + BOX_W / 2}" y="${PAD_Y + 54}" text-anchor="middle" class="route-node-sub">${subText}</text>` : ''}
+        </g>`;
     });
+    svg += '</svg>';
+
     $card.empty()
       .append('<div class="side-eyebrow">Relay Path</div>')
-      .append($dl)
+      .append(`<div class="route-diagram-scroll">${svg}</div>`)
       .show();
   }
 
@@ -821,6 +1013,9 @@ $(function () {
 
   function showTextResponse() {
     $('#responseImageWrap').hide();
+    const $video = $('#responseVideo');
+    if ($video.length) $video.get(0).pause();
+    $('#responseVideoWrap').hide();
     $('#responseBody').show();
     $('#responseBodyToolbar').show();
   }
@@ -828,8 +1023,47 @@ $(function () {
   function showImageResponse(contentType, base64) {
     $('#responseBody').hide();
     $('#responseBodyToolbar').hide();
+    $('#responseVideoWrap').hide();
     $('#responseImage').attr('src', `data:${contentType};base64,${base64}`);
     $('#responseImageWrap').css('display', 'flex');
+  }
+
+  function showVideoResponse(streamUrl) {
+    $('#responseBody').hide();
+    $('#responseBodyToolbar').hide();
+    $('#responseImageWrap').hide();
+    $('#responseVideo').attr('src', streamUrl);
+    $('#responseVideoWrap').css('display', 'flex');
+  }
+
+  // Points a <video> tag straight at /api/stream instead of the buffered
+  // data: URI an image gets — real Range-request seeking only works
+  // against a plain URL, never a data: URI (the whole thing has to be one
+  // in-memory string either way, so there's nothing to seek "into").
+  // Reads straight from the composer's current fields, same as
+  // renderSecurityView already does for the URL — not threaded through as
+  // a parameter, since nothing else needs it.
+  function buildStreamUrl(requestHeaders) {
+    const configFile = $('#routeSelect').val();
+    const url = substituteVars($('#urlInput').val().trim());
+    const port = parseInt($('#targetPort').val(), 10) || undefined;
+    const withTimingDefense = $('#withTimingDefense').is(':checked');
+    const timeout = parseFloat($('#timeoutInput').val()) || undefined;
+    const verify = $('#verifyTls').is(':checked');
+    const clientCert = $('#clientCertPath').val().trim();
+
+    const params = new URLSearchParams();
+    params.set('url', url);
+    params.set('config_file', configFile);
+    if (port) params.set('port', String(port));
+    if (withTimingDefense) params.set('with_timing_defense', '1');
+    if (timeout) params.set('timeout', String(timeout));
+    if (!verify) params.set('verify', '0');
+    if (clientCert) params.set('client_cert', clientCert);
+    if (requestHeaders && Object.keys(requestHeaders).length) {
+      params.set('headers', JSON.stringify(requestHeaders));
+    }
+    return '/api/stream?' + params.toString();
   }
 
   function metaRows(obj, exclude) {
@@ -917,14 +1151,22 @@ $(function () {
       showImageResponse(result.content_type, result.body_base64);
       let byteLength = 0;
       try { byteLength = atob(result.body_base64).length; } catch (e) { /* ignore */ }
-      $('#sizeStat').text(`${byteLength} B`);
+      $('#sizeStat').text(formatBytes(byteLength));
       $('#metadataTab').show();
       $('#responseMetadata').html(renderMetadataView(result.metadata));
+    } else if (result.is_video) {
+      showVideoResponse(buildStreamUrl(actualRequestHeaders));
+      const contentLength = (result.headers || {})['content-length'];
+      $('#sizeStat').text(contentLength ? formatBytes(contentLength) : '');
+      $('#metadataTab').hide();
+      if ($('#metadataTab').hasClass('active')) {
+        $('#responseTabs .tab[data-rtab="body"]').trigger('click');
+      }
     } else {
       showTextResponse();
       const bodyText = result.is_binary ? '(binary response body — not shown)' : (result.body || '');
       $('#responseBody').text(prettyBody(bodyText));
-      $('#sizeStat').text(bodyText ? `${new Blob([bodyText]).size} B` : '');
+      $('#sizeStat').text(bodyText ? formatBytes(new Blob([bodyText]).size) : '');
       $('#metadataTab').hide();
       if ($('#metadataTab').hasClass('active')) {
         $('#responseTabs .tab[data-rtab="body"]').trigger('click');
@@ -944,47 +1186,436 @@ $(function () {
     $('#securityCount').text(security.issueCount ? `(${security.issueCount})` : '');
   }
 
-  function send() {
-    const configFile = $('#routeSelect').val();
-    const url = substituteVars($('#urlInput').val().trim());
+  // ---------------- Query file ($$QF$$ batch runs) ----------------
+  //
+  // A $$QF$$ (or $$QF::<status_code>$$) token anywhere in the URL, a
+  // header value, or the body means "run this once per line in the
+  // attached file, substituting that line in for the token each time" —
+  // a lightweight fuzzer/wordlist runner built on the exact same
+  // /api/send + {{var}} machinery a single request already uses, not a
+  // separate code path. The ::<code> variant additionally stops the run
+  // the moment a response's status code matches, instead of always
+  // running every line.
 
-    if (!configFile) return alert('Pick a route config first.');
-    if (!url) return alert('URL is required.');
+  let queryFileLines = [];
+  let batchAbort = false;
 
+  // Both $$QF$$ and $$QF::<...>$$[::om] are per-line substitution points —
+  // each is replaced with the current line's value wherever it appears,
+  // exactly like plain $$QF$$. $$QF::<...>$$ ALSO declares a condition,
+  // parsed once up front from the raw (pre-substitution) fields,
+  // independently of the substitution pass — and the trailing ::om switch
+  // decides what that condition means for the run:
+  //   $$QF::<...>$$       stop the whole run the moment a response matches.
+  //   $$QF::<...>::om$$   keep running every line, but only SAVE to Batch
+  //                        the lines whose response matches — everything
+  //                        else still runs and still renders, it's just
+  //                        never persisted.
+  const QF_TOKEN_RE = /\$\$QF(?:::<[\s\S]*?>(?:::om)?)?\$\$/g;
+  const QF_STOP_RE = /\$\$QF::<([\s\S]*?)>(::om)?\$\$/;
+  const QF_ANY_RE = /\$\$QF(?:::<[\s\S]*?>(?:::om)?)?\$\$/;
+
+  function substituteQF(str, value) {
+    if (str == null) return str;
+    return String(str).replace(QF_TOKEN_RE, () => value);
+  }
+
+  function containsQF(strings) {
+    return strings.some((s) => s != null && QF_ANY_RE.test(String(s)));
+  }
+
+  // code and headers[...] both accept any of these comparison operators.
+  // Order matters here: a 2-char operator must be tried before the 1-char
+  // operators that are its own prefix (>= before >, <= before <, != has no
+  // 1-char prefix collision but stays grouped with the others for
+  // clarity), or ">=value" would tokenize as ">" leaving a stray "=".
+  const QF_OP_RE = '(!=|>=|<=|=|>|<)';
+
+  // Tokenizes the inside of $$QF::<...>$$ into predicates —
+  // code<op><number>, body_contains=['kw1','kw2'], headers[Name]<op>value
+  // (value quoted with ' or ", or a bareword up to the next space/paren;
+  // <op> is one of != = >= <= > <) — plus AND / OR (case-insensitive) and
+  // parens for grouping. A predicate is recognized as one indivisible unit
+  // (its own regex anchored at the tokenizer's current position) BEFORE
+  // the generic AND/OR check ever runs at that position, so e.g. a
+  // bareword header value like "Android" is consumed whole and never
+  // mistaken for the "AND" keyword.
+  function tokenizeQFExpr(text) {
+    const tokens = [];
+    const isWordChar = (c) => /[A-Za-z0-9_]/.test(c || '');
+    let i = 0;
+    const n = text.length;
+    while (i < n) {
+      const c = text[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '(') { tokens.push({ type: 'LPAREN' }); i++; continue; }
+      if (c === ')') { tokens.push({ type: 'RPAREN' }); i++; continue; }
+
+      const rest = text.slice(i);
+      const upper = rest.toUpperCase();
+      if (upper.startsWith('AND') && !isWordChar(text[i + 3])) { tokens.push({ type: 'AND' }); i += 3; continue; }
+      if (upper.startsWith('OR') && !isWordChar(text[i + 2])) { tokens.push({ type: 'OR' }); i += 2; continue; }
+
+      let m;
+      if ((m = new RegExp(`^code\\s*${QF_OP_RE}\\s*(\\d+)`, 'i').exec(rest))) {
+        tokens.push({ type: 'PRED', pred: { kind: 'code', op: m[1], value: parseInt(m[2], 10) } });
+        i += m[0].length;
+        continue;
+      }
+      if ((m = /^body_contains\s*=\s*\[([^\]]*)\]/i.exec(rest))) {
+        const keywords = m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter((s) => s.length);
+        tokens.push({ type: 'PRED', pred: { kind: 'body_contains', keywords } });
+        i += m[0].length;
+        continue;
+      }
+      if ((m = new RegExp(`^headers\\[([^\\]]+)\\]\\s*${QF_OP_RE}\\s*`, 'i').exec(rest))) {
+        const key = m[1].trim();
+        const op = m[2];
+        let j = i + m[0].length;
+        let value;
+        if (text[j] === '"' || text[j] === "'") {
+          const quote = text[j];
+          const end = text.indexOf(quote, j + 1);
+          if (end === -1) { value = text.slice(j + 1); j = n; } else { value = text.slice(j + 1, end); j = end + 1; }
+        } else {
+          const start = j;
+          while (j < n && !/[\s)]/.test(text[j])) j++;
+          value = text.slice(start, j);
+        }
+        tokens.push({ type: 'PRED', pred: { kind: 'header', key, op, value } });
+        i = j;
+        continue;
+      }
+
+      // Unrecognized character (stray punctuation, typo) — skip it rather
+      // than throwing, so a slightly malformed expression degrades to
+      // "ignore the noise" instead of breaking the whole composer.
+      i++;
+    }
+    return tokens;
+  }
+
+  // Recursive-descent parse of the token stream into a boolean-expression
+  // tree: AND binds tighter than OR (standard precedence), and parens
+  // override both. AND/OR nodes flatten same-operator siblings into one
+  // { type, children:[...] } array rather than nesting binary pairs, so
+  // evaluation is a plain every()/some() over children.
+  function parseQFExprTokens(tokens) {
+    let pos = 0;
+    function peek() { return tokens[pos]; }
+    function parsePrimary() {
+      const t = peek();
+      if (!t) return null;
+      if (t.type === 'LPAREN') {
+        pos++;
+        const inner = parseOr();
+        if (peek() && peek().type === 'RPAREN') pos++;
+        return inner;
+      }
+      if (t.type === 'PRED') { pos++; return { type: 'PRED', pred: t.pred }; }
+      // A stray AND/OR/RPAREN where a predicate was expected — skip it and
+      // keep going, same tolerant-of-noise stance as the tokenizer.
+      pos++;
+      return parsePrimary();
+    }
+    function parseAnd() {
+      let node = parsePrimary();
+      while (peek() && peek().type === 'AND') {
+        pos++;
+        const right = parsePrimary();
+        if (!right) break;
+        node = { type: 'AND', children: (node && node.type === 'AND' ? node.children : [node]).concat([right]) };
+      }
+      return node;
+    }
+    function parseOr() {
+      let node = parseAnd();
+      while (peek() && peek().type === 'OR') {
+        pos++;
+        const right = parseAnd();
+        if (!right) break;
+        node = { type: 'OR', children: (node && node.type === 'OR' ? node.children : [node]).concat([right]) };
+      }
+      return node;
+    }
+    return parseOr();
+  }
+
+  // Parses the inside of $$QF::<...>$$ into a boolean-expression tree, or
+  // null if it's empty/has no recognized predicates (never matches).
+  function parseQFStopSpec(specText) {
+    const tokens = tokenizeQFExpr(specText);
+    if (!tokens.some((t) => t.type === 'PRED')) return null;
+    return parseQFExprTokens(tokens);
+  }
+
+  // Scans the raw fields for the (single) $$QF::<...>$$ token and returns
+  // both its parsed expression tree and which of the two modes below it
+  // declared. omit and stopSpec are mutually exclusive by construction: a
+  // run either stops early on match, or filters what gets saved — never
+  // both.
+  //   $$QF::<...>$$       stop the whole run the moment a response matches.
+  //   $$QF::<...>::om$$   keep running every line, but only SAVE to Batch
+  //                        the lines whose response matches — everything
+  //                        else still runs and still renders, it's just
+  //                        never persisted.
+  function findQFMode(strings) {
+    for (const s of strings) {
+      if (s == null) continue;
+      const m = String(s).match(QF_STOP_RE);
+      if (m) {
+        const spec = parseQFStopSpec(m[1]);
+        const omit = !!m[2];
+        return { stopSpec: omit ? null : spec, omitSpec: omit ? spec : null };
+      }
+    }
+    return { stopSpec: null, omitSpec: null };
+  }
+
+  // Applies one of != = >= <= > < to two already-comparable values (both
+  // numbers, or both strings for = / !=).
+  function compareQFOp(actual, op, expected) {
+    switch (op) {
+      case '=': return actual === expected;
+      case '!=': return actual !== expected;
+      case '>=': return actual >= expected;
+      case '<=': return actual <= expected;
+      case '>': return actual > expected;
+      case '<': return actual < expected;
+      default: return false;
+    }
+  }
+
+  function matchesQFPred(pred, result) {
+    if (pred.kind === 'code') {
+      return compareQFOp(result.status_code, pred.op, pred.value);
+    }
+    if (pred.kind === 'body_contains') {
+      const body = String(result.body || '').toLowerCase();
+      return pred.keywords.some((kw) => body.includes(String(kw).toLowerCase()));
+    }
+    if (pred.kind === 'header') {
+      const respHeaders = result.headers || {};
+      const lowerHeaders = {};
+      Object.keys(respHeaders).forEach((k) => { lowerHeaders[k.toLowerCase()] = respHeaders[k]; });
+      const actual = lowerHeaders[pred.key.toLowerCase()];
+      // = / != keep the existing case-insensitive substring behavior (so
+      // headers[content-type]="application/json" still matches a real
+      // "application/json; charset=utf-8" response header) — != is just
+      // its negation, true when the header is absent too. The ordering
+      // operators only make sense numerically, so they parse both sides
+      // as numbers and fail closed (no match) if either isn't one.
+      if (pred.op === '=') {
+        return actual != null && String(actual).toLowerCase().includes(String(pred.value).toLowerCase());
+      }
+      if (pred.op === '!=') {
+        return actual == null || !String(actual).toLowerCase().includes(String(pred.value).toLowerCase());
+      }
+      if (actual == null) return false;
+      const actualNum = parseFloat(actual);
+      const expectedNum = parseFloat(pred.value);
+      if (Number.isNaN(actualNum) || Number.isNaN(expectedNum)) return false;
+      return compareQFOp(actualNum, pred.op, expectedNum);
+    }
+    return false;
+  }
+
+  // Evaluates the expression tree from parseQFStopSpec against a
+  // response. AND nodes require every child to match, OR nodes require
+  // any one child to match — exactly the boolean logic the AND/OR/parens
+  // in the token spell out. body_contains keeps its own "any keyword"
+  // semantics as a single predicate. All text matching is a
+  // case-insensitive substring check, not exact equality, so e.g.
+  // headers[content-type]="application/json" still matches a real
+  // "application/json; charset=utf-8" response header.
+  function matchesQFSpec(result, node) {
+    if (!node) return false;
+    if (node.type === 'AND') return node.children.every((c) => matchesQFSpec(result, c));
+    if (node.type === 'OR') return node.children.some((c) => matchesQFSpec(result, c));
+    if (node.type === 'PRED') return matchesQFPred(node.pred, result);
+    return false;
+  }
+
+  $('#queryFileInput').on('change', function () {
+    const file = this.files && this.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      queryFileLines = String(reader.result)
+        .split(/\r\n|\r|\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const count = queryFileLines.length;
+      $('#batchFileChip').text(`${file.name} · ${count} line${count === 1 ? '' : 's'}`);
+      $('#clearQueryFileBtn').show();
+    };
+    reader.onerror = () => alert("Couldn't read that file.");
+    reader.readAsText(file);
+  });
+
+  $('#clearQueryFileBtn').on('click', function () {
+    queryFileLines = [];
+    $('#queryFileInput').val('');
+    $('#batchFileChip').text('');
+    $(this).hide();
+  });
+
+  $('#batchStopBtn').on('click', () => { batchAbort = true; });
+
+  // ---------------- $$QF$$ syntax help ----------------
+
+  function openQFHelp() { $('#qfHelpOverlay').css('display', 'flex'); }
+  function closeQFHelp() { $('#qfHelpOverlay').hide(); }
+
+  $('#qfHelpBtn').on('click', openQFHelp);
+  $('#qfHelpCloseBtn').on('click', closeQFHelp);
+  $('#qfHelpOverlay').on('click', function (e) {
+    if (e.target === this) closeQFHelp();
+  });
+  $(document).on('keydown', function (e) {
+    if (e.key === 'Escape' && $('#qfHelpOverlay').is(':visible')) closeQFHelp();
+  });
+
+  // ---------------- Send ----------------
+
+  function buildHeaders(rawHeaders, authHeader) {
     const headers = {};
-    const rawHeaders = collectKVRows($('#headerRows'));
-    Object.entries(Object.assign({}, computeAuthHeader(), rawHeaders)).forEach(([k, v]) => {
+    Object.entries(Object.assign({}, authHeader, rawHeaders)).forEach(([k, v]) => {
       headers[k] = substituteVars(v);
     });
     if (!Object.keys(headers).some((k) => k.toLowerCase() === 'user-agent')) {
       headers['User-Agent'] = DEFAULT_USER_AGENT;
     }
+    return headers;
+  }
 
+  // Sends exactly one request from already-resolved (any $$QF$$ already
+  // substituted) raw field values, applying {{var}} substitution the same
+  // way a single manual Send always has. Resolves with the result either
+  // way (success or failure) instead of using done()/fail() separately,
+  // so a batch run can await one thing per line without duplicating the
+  // render/history/pending bookkeeping below.
+  function sendOne({ configFile, rawUrl, rawHeaders, authHeader, rawBody, batch }) {
+    const url = substituteVars(rawUrl);
+    const headers = buildHeaders(rawHeaders, authHeader);
     const payload = {
       config_file: configFile,
       port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),
+      timeout: parseFloat($('#timeoutInput').val()) || undefined,
+      verify: $('#verifyTls').is(':checked'),
+      client_cert: $('#clientCertPath').val().trim() || undefined,
       method: $('#methodSelect').val(),
       url,
       headers,
-      body: substituteVars($('#bodyInput').val()) || undefined,
+      body: substituteVars(rawBody) || undefined,
     };
+    if (batch) {
+      payload.batch_run_id = batch.runId;
+      payload.batch_line_index = batch.lineIndex;
+      payload.batch_line_value = batch.lineValue;
+      payload.batch_url_template = batch.urlTemplate;
+      // Sent as the plain expression tree (AND/OR/PRED nodes) — evaluated
+      // server-side, since that's the one that decides whether to persist
+      // this line at all; the client already has the response by the time
+      // it could evaluate this, but by then it's too late to un-send the
+      // POST that saved it.
+      if (batch.omitSpec) {
+        payload.batch_omit_spec = batch.omitSpec;
+      }
+    }
 
     setPending(true);
-    $.ajax({
-      url: '/api/send',
-      method: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(payload),
-    })
-      .done((result) => {
-        renderResponse(result, headers);
-        loadHistory();
+    return new Promise((resolve) => {
+      $.ajax({
+        url: '/api/send',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(payload),
       })
-      .fail((xhr) => {
-        renderResponse(xhr.responseJSON || { ok: false, error: 'request failed' }, headers);
-      })
-      .always(() => setPending(false));
+        .done((result) => {
+          renderResponse(result, headers);
+          if (batch) {
+            loadBatchRuns();
+          } else {
+            loadHistory();
+          }
+          resolve(result);
+        })
+        .fail((xhr) => {
+          const result = xhr.responseJSON || { ok: false, error: 'request failed' };
+          renderResponse(result, headers);
+          resolve(result);
+        })
+        .always(() => setPending(false));
+    });
+  }
+
+  function runBatch({ configFile, rawUrl, rawHeaders, authHeader, rawBody, stopSpec, omitSpec }) {
+    batchAbort = false;
+    const total = queryFileLines.length;
+    const runId = 'run_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    $('#batchProgress').css('display', 'flex');
+    $('#sendBtn').prop('disabled', true);
+
+    let i = 0;
+    const next = () => {
+      if (batchAbort) {
+        $('#batchProgressText').text(`Stopped — sent ${i}/${total}.`);
+        $('#sendBtn').prop('disabled', false);
+        return;
+      }
+      if (i >= total) {
+        $('#batchProgressText').text(`Done — sent ${total}/${total}.`);
+        $('#sendBtn').prop('disabled', false);
+        return;
+      }
+      const lineIndex = i;
+      const line = queryFileLines[i];
+      i += 1;
+      $('#batchProgressText').text(`Sending ${i}/${total}…`);
+
+      sendOne({
+        configFile,
+        rawUrl: substituteQF(rawUrl, line),
+        rawHeaders: Object.fromEntries(Object.entries(rawHeaders).map(([k, v]) => [k, substituteQF(v, line)])),
+        authHeader: Object.fromEntries(Object.entries(authHeader).map(([k, v]) => [k, substituteQF(v, line)])),
+        rawBody: substituteQF(rawBody, line),
+        batch: { runId, lineIndex, lineValue: line, urlTemplate: rawUrl, omitSpec },
+      }).then((result) => {
+        if (matchesQFSpec(result, stopSpec)) {
+          $('#batchProgressText').text(`Stopped — matched stop condition on line ${i}/${total}.`);
+          $('#sendBtn').prop('disabled', false);
+          return;
+        }
+        next();
+      });
+    };
+    next();
+  }
+
+  function send() {
+    const configFile = $('#routeSelect').val();
+    const rawUrl = $('#urlInput').val().trim();
+    if (!configFile) return alert('Pick a route config first.');
+    if (!rawUrl) return alert('URL is required.');
+
+    const rawHeaders = collectKVRows($('#headerRows'));
+    const authHeader = computeAuthHeader();
+    const rawBody = $('#bodyInput').val();
+
+    const allRaw = [rawUrl, rawBody, ...Object.values(rawHeaders), ...Object.values(authHeader)];
+
+    if (containsQF(allRaw)) {
+      if (!queryFileLines.length) {
+        return alert('Found $$QF$$ in the request, but no query file is attached — click "Query file…" first.');
+      }
+      const { stopSpec, omitSpec } = findQFMode(allRaw);
+      runBatch({ configFile, rawUrl, rawHeaders, authHeader, rawBody, stopSpec, omitSpec });
+      return;
+    }
+
+    sendOne({ configFile, rawUrl, rawHeaders, authHeader, rawBody });
   }
 
   $('#sendBtn').on('click', send);

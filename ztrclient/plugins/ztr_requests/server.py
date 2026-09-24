@@ -6,13 +6,11 @@ hit Send, see the response.
 
     python3 plugins/ztr_requests/server.py
 
-Same host-resolution as ztr_dashboard.py: binds to the dedicated dummy
-interface (10.10.15.10, see installer-linux.sh --with-local-ip) if this
-machine has one, else falls back to 127.0.0.1 — reachable over the ZTR
-tunnel/dummy interface rather than the open LAN by default, which matters
-here since a request built in this UI can carry a route's real
-identifier/secret_key-backed tunnel plus whatever headers/body you type
-into it. Pass --host to override either way.
+This app's own HTTP port is local-machine-only by default (127.0.0.1) —
+unlike ztr_dashboard.py it isn't meant to be reached over the LAN, since a
+request built here can carry this route's real identifier/secret_key-backed
+tunnel plus whatever headers/body you type into it. Pass --host to widen
+that if you really want to.
 """
 import argparse
 import base64
@@ -20,7 +18,6 @@ import http.server
 import io
 import json
 import os
-import socket
 import socketserver
 import sys
 import time
@@ -43,14 +40,12 @@ sys.path.insert(0, os.path.join(_ZTR_CLIENT_DIR, "utils"))
 sys.path.insert(0, PLUGINS_DIR)
 
 import ztr_https  # noqa: E402
-from ztrClient import TunnelError, NetworkError  # noqa: E402
+from ztrClient import ZTRClientError, TunnelError, NetworkError  # noqa: E402
 from session_manager import SessionManager  # noqa: E402
 from history_store import HistoryStore  # noqa: E402
 from environment_store import EnvironmentStore  # noqa: E402
 from collection_store import CollectionStore  # noqa: E402
-
-DEFAULT_HOST_CANDIDATE = "10.10.15.10"
-FALLBACK_HOST = "127.0.0.1"
+from batch_store import BatchStore  # noqa: E402
 
 ROUTES_DIR = os.path.join(_ZTR_CLIENT_DIR, "routes")
 _STATIC_CONTENT_TYPES = {
@@ -64,6 +59,102 @@ sessions = SessionManager()
 history = HistoryStore()
 environment = EnvironmentStore()
 collection = CollectionStore()
+batch = BatchStore()
+
+
+def _compare_qf_op(actual, op, expected):
+    if op == "=":
+        return actual == expected
+    if op == "!=":
+        return actual != expected
+    if op == ">=":
+        return actual >= expected
+    if op == "<=":
+        return actual <= expected
+    if op == ">":
+        return actual > expected
+    if op == "<":
+        return actual < expected
+    return False
+
+
+def _matches_batch_pred(pred, result):
+    kind = pred.get("kind")
+    if kind == "code":
+        return _compare_qf_op(result.get("status_code"), pred.get("op"), pred.get("value"))
+    if kind == "body_contains":
+        body = str(result.get("body") or "").lower()
+        keywords = pred.get("keywords") or []
+        return any(str(kw).lower() in body for kw in keywords)
+    if kind == "header":
+        resp_headers = result.get("headers") or {}
+        lower_headers = {str(k).lower(): v for k, v in resp_headers.items()}
+        actual = lower_headers.get(str(pred.get("key") or "").lower())
+        op = pred.get("op")
+        # = / != keep the existing case-insensitive substring behavior
+        # (so headers[content-type]="application/json" still matches a
+        # real "application/json; charset=utf-8" response header) — != is
+        # just its negation, true when the header is absent too. The
+        # ordering operators only make sense numerically, so they parse
+        # both sides as numbers and fail closed (no match) if either isn't.
+        if op == "=":
+            return actual is not None and str(pred.get("value") or "").lower() in str(actual).lower()
+        if op == "!=":
+            return actual is None or str(pred.get("value") or "").lower() not in str(actual).lower()
+        if actual is None:
+            return False
+        try:
+            actual_num = float(actual)
+            expected_num = float(pred.get("value"))
+        except (TypeError, ValueError):
+            return False
+        return _compare_qf_op(actual_num, op, expected_num)
+    return False
+
+
+def _matches_batch_spec(result, node):
+    """Evaluates the AND/OR/PRED expression tree a $$QF::<...>::om$$ token
+    parses to against a response. Kept in exact sync with app.js's
+    matchesQFSpec()/matchesQFPred() — the CLIENT does all the parsing
+    (tokenizing "code=200 AND headers[key]=something", precedence,
+    parens) and sends the already-built tree here as plain JSON; this side
+    only ever evaluates it. The *decision* of whether a line gets saved
+    still has to happen server-side though, since the client already has
+    the (already rendered) response by the time it would know the answer
+    — too late to un-send the /api/send call that persists it.
+    """
+    if not node:
+        return False
+    node_type = node.get("type")
+    if node_type == "AND":
+        return all(_matches_batch_spec(result, c) for c in node.get("children") or [])
+    if node_type == "OR":
+        return any(_matches_batch_spec(result, c) for c in node.get("children") or [])
+    if node_type == "PRED":
+        return _matches_batch_pred(node.get("pred") or {}, result)
+    return False
+
+
+DEFAULT_TIMEOUT = 30.0
+
+
+def _parse_timeout(raw):
+    """Parses a user-supplied timeout (seconds) from a request payload —
+    None/"" (not set) defaults to DEFAULT_TIMEOUT rather than falling
+    through to ztr_https.Session's own default, so the "defaults to 30" the
+    UI advertises is an explicit, testable fact here, not an implicit
+    coincidence of two defaults happening to agree. Raises ValueError for
+    anything that isn't a positive number, same shape as the port parsing
+    right above every caller of this."""
+    if raw in (None, ""):
+        return DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except TypeError:
+        raise ValueError("timeout must be a number")
+    if value <= 0:
+        raise ValueError("timeout must be positive")
+    return value
 
 
 def list_route_files():
@@ -198,9 +289,66 @@ def extract_image_metadata(raw_bytes):
     return info
 
 
-def send_request(session, method, url, headers, body, port=None):
+def send_request(session, method, url, headers, body, port=None, timeout=None):
     started = time.monotonic()
-    resp = session.request(method, url, headers=headers, data=body, port=port)
+    # stream=True so headers (and therefore Content-Type) are available
+    # before any body bytes are pulled through the tunnel — a video body
+    # never gets touched at all below (resp.abort()), instead of buffering
+    # the whole thing here just to find out what /api/stream was going to
+    # fetch a second time anyway.
+    resp = session.request(method, url, headers=headers, data=body, port=port, timeout=timeout, stream=True)
+
+    header_map = resp.headers or {}  # ztr_https.Response.headers is already lowercase-keyed
+    declared_content_type = header_map.get("content-type", "")
+    content_type = declared_content_type
+    is_image = content_type.split(";")[0].strip().lower().startswith("image/")
+    # No Pillow-equivalent sniff for video — a mislabeled video response
+    # just won't be detected as one, same as any other non-image binary
+    # body. Trusting the header here is the same tradeoff a <video> tag
+    # itself makes.
+    is_video = content_type.split(";")[0].strip().lower().startswith("video/")
+    sniffed = False
+
+    body_text = None
+    body_base64 = None
+    is_binary = False
+    metadata = None
+
+    if is_video:
+        # Headers alone are enough to know this — never pull the body
+        # through the tunnel here at all. Real playback goes through
+        # /api/stream (GET, Range-aware) instead.
+        resp.abort()
+    else:
+        raw = resp.content  # first access here is what actually drains the tunnel
+        if not is_image:
+            sniffed_mime = sniff_image_mime(raw)
+            if sniffed_mime:
+                is_image = True
+                sniffed = True
+                content_type = sniffed_mime
+
+        if is_image:
+            body_base64 = base64.b64encode(raw).decode("ascii")
+            metadata = extract_image_metadata(raw)
+            if sniffed and metadata is not None:
+                # Worth surfacing — a server lying about Content-Type is
+                # itself a small data point, not just something to
+                # silently paper over.
+                metadata["declared_content_type"] = declared_content_type or "(none)"
+        else:
+            # Decoded strictly here rather than via resp.text, which uses
+            # errors="replace" and so would never raise — this app wants a
+            # real binary/not-binary distinction, not a body full of
+            # U+FFFD.
+            charset = "utf-8"
+            if "charset=" in declared_content_type:
+                charset = declared_content_type.split("charset=", 1)[1].split(";", 1)[0].strip()
+            try:
+                body_text = raw.decode(charset)
+            except (UnicodeDecodeError, LookupError, ValueError):
+                is_binary = True
+
     elapsed_ms = round((time.monotonic() - started) * 1000, 1)
 
     # A Set-Cookie can arrive on an intermediate redirect hop rather than
@@ -213,43 +361,6 @@ def send_request(session, method, url, headers, body, port=None):
     for hop in list(resp.history) + [resp]:
         all_set_cookies.update(hop.cookies)
         all_set_cookie_headers.extend(hop.set_cookie_headers)
-
-    header_map = resp.headers or {}  # ztr_https.Response.headers is already lowercase-keyed
-    declared_content_type = header_map.get("content-type", "")
-    content_type = declared_content_type
-    is_image = content_type.split(";")[0].strip().lower().startswith("image/")
-    sniffed = False
-
-    if not is_image:
-        sniffed_mime = sniff_image_mime(resp.content)
-        if sniffed_mime:
-            is_image = True
-            sniffed = True
-            content_type = sniffed_mime
-
-    body_text = None
-    body_base64 = None
-    is_binary = False
-    metadata = None
-
-    if is_image:
-        body_base64 = base64.b64encode(resp.content).decode("ascii")
-        metadata = extract_image_metadata(resp.content)
-        if sniffed and metadata is not None:
-            # Worth surfacing — a server lying about Content-Type is itself
-            # a small data point, not just something to silently paper over.
-            metadata["declared_content_type"] = declared_content_type or "(none)"
-    else:
-        # Decoded strictly here rather than via resp.text, which uses
-        # errors="replace" and so would never raise — this app wants a
-        # real binary/not-binary distinction, not a body full of U+FFFD.
-        charset = "utf-8"
-        if "charset=" in declared_content_type:
-            charset = declared_content_type.split("charset=", 1)[1].split(";", 1)[0].strip()
-        try:
-            body_text = resp.content.decode(charset)
-        except (UnicodeDecodeError, LookupError, ValueError):
-            is_binary = True
 
     return {
         "ok": resp.ok,
@@ -264,6 +375,7 @@ def send_request(session, method, url, headers, body, port=None):
         "body_base64": body_base64,
         "content_type": content_type,
         "is_image": is_image,
+        "is_video": is_video,
         "metadata": metadata,
         "is_binary": is_binary,
         "error": None,
@@ -308,6 +420,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"environments": environment.list_environments()})
         elif path == "/api/collection":
             self._send_json(200, {"items": collection.list()})
+        elif path == "/api/stream":
+            self._handle_stream(qs)
+        elif path == "/api/batch/runs":
+            self._send_json(200, {"runs": batch.list_runs()})
+        elif path == "/api/batch/requests":
+            run_id = qs.get("run_id", [""])[0]
+            if not run_id:
+                self._send_json(400, {"ok": False, "error": "run_id is required"})
+                return
+            self._send_json(200, {"requests": batch.list_requests(run_id)})
+        elif path == "/api/batch/request":
+            run_id = qs.get("run_id", [""])[0]
+            raw_line_index = qs.get("line_index", [""])[0]
+            if not run_id or raw_line_index == "":
+                self._send_json(400, {"ok": False, "error": "run_id and line_index are required"})
+                return
+            try:
+                line_index = int(raw_line_index)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "line_index must be a number"})
+                return
+            row = batch.get_request(run_id, line_index)
+            if row is None:
+                self._send(404, "text/plain", b"not found")
+                return
+            self._send_json(200, row)
         else:
             self._send(404, "text/plain", b"not found")
 
@@ -358,6 +496,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sessions.drop(
                 config_file=(body.get("config_file") or "").strip(),
                 with_timing_defense=bool(body.get("with_timing_defense")),
+                verify=body.get("verify", True) if isinstance(body.get("verify", True), bool) else True,
+                cert=(body.get("client_cert") or "").strip() or None,
             )
             self._send_json(200, {"ok": True})
         else:
@@ -396,6 +536,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             collection.delete(entry_id)
             self._send_json(200, {"ok": True})
+        elif path == "/api/batch/runs":
+            run_id = qs.get("run_id", [""])[0]
+            if not run_id:
+                self._send_json(400, {"ok": False, "error": "run_id is required"})
+                return
+            batch.delete_run(run_id)
+            self._send_json(200, {"ok": True})
         else:
             self._send(404, "text/plain", b"not found")
 
@@ -416,16 +563,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "port must be between 1 and 65535"})
             return
 
+        try:
+            timeout = _parse_timeout(body.get("timeout"))
+        except ValueError:
+            self._send_json(400, {"ok": False, "error": "timeout must be a positive number"})
+            return
+        verify = body.get("verify", True)
+        if not isinstance(verify, bool):
+            verify = True
+        client_cert = (body.get("client_cert") or "").strip() or None
+
         if not config_file or not url:
             self._send_json(400, {"ok": False, "error": "config_file and url are required"})
             return
 
-        session_kwargs = dict(config_file=config_file, with_timing_defense=with_timing_defense)
+        batch_run_id = (body.get("batch_run_id") or "").strip()
+        raw_line_index = body.get("batch_line_index")
+        batch_line_value = body.get("batch_line_value")
+        batch_url_template = body.get("batch_url_template")
+        batch_omit_spec = body.get("batch_omit_spec")
+        batch_line_index = None
+        if batch_run_id:
+            try:
+                batch_line_index = int(raw_line_index)
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "batch_line_index must be a number"})
+                return
+
+        session_kwargs = dict(
+            config_file=config_file,
+            with_timing_defense=with_timing_defense,
+            verify=verify,
+            cert=client_cert,
+        )
         session = sessions.get_or_create(**session_kwargs)
 
         try:
-            result = send_request(session, method, url, headers, req_body, port=port)
-        except (TunnelError, NetworkError, ztr_https.HTTPProtocolError, ValueError) as e:
+            result = send_request(session, method, url, headers, req_body, port=port, timeout=timeout)
+        except (ZTRClientError, ValueError, OSError) as e:
             # The session's pooled connections may now be wedged (e.g. a
             # cached tunnel authorization went stale) — drop it so the
             # next Send rebuilds from scratch instead of retrying a dead
@@ -434,24 +609,146 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(502, {"ok": False, "error": str(e), "elapsed_ms": None})
             return
 
-        history.add({
-            "method": method,
-            "url": url,
-            "config_file": config_file,
-            "target_port": port,
-            # The exact headers actually sent (includes anything the
-            # Session added itself, e.g. a Cookie from its jar) rather
-            # than just what the composer had, when that's available.
-            "request_headers": result.get("request_headers") or headers,
-            "request_body": req_body,
-            "ok": result.get("ok"),
-            "status_code": result.get("status_code"),
-            "response_headers": result.get("headers"),
-            "response_body": result.get("body"),
-            "error": result.get("error"),
-            "elapsed_ms": result.get("elapsed_ms"),
-        })
+        if batch_run_id:
+            # ::om mode (batch_omit_spec set): the client already rendered
+            # this response before it could know whether it matched — by
+            # then it's too late to un-send the save, so the decision has
+            # to happen here, on the same request, before batch.add() ever
+            # runs. A non-matching line still ran and still shows in the
+            # response panel; it just never gets persisted to Batch.
+            if not batch_omit_spec or _matches_batch_spec(result, batch_omit_spec):
+                batch.add(
+                    batch_run_id,
+                    batch_line_index,
+                    batch_line_value,
+                    method,
+                    url,
+                    batch_url_template,
+                    result.get("request_headers") or headers,
+                    req_body,
+                    result,
+                )
+        else:
+            history.add({
+                "method": method,
+                "url": url,
+                "config_file": config_file,
+                "target_port": port,
+                # The exact headers actually sent (includes anything the
+                # Session added itself, e.g. a Cookie from its jar) rather
+                # than just what the composer had, when that's available.
+                "request_headers": result.get("request_headers") or headers,
+                "request_body": req_body,
+                "ok": result.get("ok"),
+                "status_code": result.get("status_code"),
+                "response_headers": result.get("headers"),
+                "response_body": result.get("body"),
+                "error": result.get("error"),
+                "elapsed_ms": result.get("elapsed_ms"),
+            })
         self._send_json(200, result)
+
+    # Headers relayed from the upstream (tunneled) response straight to
+    # the browser, unmodified — everything else (Transfer-Encoding,
+    # Connection, Content-Encoding once ztr_https has already transparently
+    # decoded it) either doesn't apply to how this server frames its own
+    # response or would actively lie about it if passed through.
+    _STREAM_PASSTHROUGH_HEADERS = (
+        "content-type", "content-length", "content-range",
+        "accept-ranges", "cache-control", "etag", "last-modified",
+    )
+
+    def _handle_stream(self, qs):
+        """GET, not POST+JSON like /api/send — a <video> tag's src has to
+        be a plain URL. Streams the response straight through instead of
+        buffering it (ztr_https.Session.request(..., stream=True)), and
+        forwards Range/If-Range/conditional headers from the browser to
+        the upstream target and its status/Content-Range/Accept-Ranges
+        back unmodified — that round trip is what makes a <video> tag's
+        own seeking work, the same way it would against a plain static
+        file URL."""
+        url = (qs.get("url", [""])[0]).strip()
+        config_file = (qs.get("config_file", [""])[0]).strip()
+        with_timing_defense = qs.get("with_timing_defense", ["0"])[0] in ("1", "true", "True")
+        raw_port = qs.get("port", [""])[0]
+        raw_headers = qs.get("headers", [""])[0]
+        raw_timeout = qs.get("timeout", [""])[0]
+        verify = qs.get("verify", ["1"])[0] not in ("0", "false", "False")
+        client_cert = (qs.get("client_cert", [""])[0]).strip() or None
+
+        if not url or not config_file:
+            self._send(400, "text/plain", b"url and config_file are required")
+            return
+
+        try:
+            port = int(raw_port) if raw_port else None
+        except ValueError:
+            self._send(400, "text/plain", b"port must be a number")
+            return
+
+        try:
+            timeout = _parse_timeout(raw_timeout or None)
+        except ValueError:
+            self._send(400, "text/plain", b"timeout must be a positive number")
+            return
+
+        extra_headers = {}
+        if raw_headers:
+            try:
+                extra_headers = json.loads(raw_headers)
+            except json.JSONDecodeError:
+                self._send(400, "text/plain", b"headers must be JSON")
+                return
+
+        # Range/If-Range/conditional headers come from the actual browser
+        # request to *this* server (a seek is a fresh GET with its own
+        # Range) — layered on top of whatever the composer's own Headers
+        # tab asked for, not a substitute for it.
+        forward_headers = dict(extra_headers)
+        for name in ("Range", "If-Range", "If-Modified-Since", "If-None-Match"):
+            value = self.headers.get(name)
+            if value:
+                forward_headers[name] = value
+
+        session_kwargs = dict(
+            config_file=config_file,
+            with_timing_defense=with_timing_defense,
+            verify=verify,
+            cert=client_cert,
+        )
+        session = sessions.get_or_create(**session_kwargs)
+
+        try:
+            resp = session.request("GET", url, headers=forward_headers, port=port, timeout=timeout, stream=True)
+        except (ZTRClientError, ValueError, OSError) as e:
+            sessions.drop(**session_kwargs)
+            self._send(502, "text/plain", str(e).encode("utf-8"))
+            return
+
+        self.send_response(resp.status_code)
+        for name, value in (resp.headers or {}).items():
+            if name.lower() in self._STREAM_PASSTHROUGH_HEADERS:
+                self.send_header(name, value)
+        self.end_headers()
+
+        try:
+            for chunk in resp.iter_content():
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            # The browser seeked (aborting this request for a new
+            # Range one) or navigated away — not a real error, just stop.
+            pass
+        finally:
+            # Drains whatever's left so the connection can be returned to
+            # (or evicted from) the session's pool the same way a normal
+            # request's does — on an abort above this may mean fully
+            # draining a response nothing downstream still wants, which
+            # is a real but bounded cost, not worth a bespoke "just close
+            # the socket" path for what this app is sized for.
+            try:
+                resp.close()
+            except (TunnelError, OSError, ConnectionError, NetworkError):
+                pass
 
     def _serve_static(self, name):
         # normpath collapses any ../ first; the startswith check afterward
@@ -469,31 +766,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, content_type, f.read())
 
 
-def resolve_host(explicit_host):
-    """Same probe ztr_dashboard.py uses: bind a throwaway socket to
-    DEFAULT_HOST_CANDIDATE to check whether this machine actually has
-    that address (the dummy interface from --with-local-ip) before
-    defaulting to it, rather than assuming and failing at real bind
-    time with a less obvious error."""
-    if explicit_host:
-        return explicit_host
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind((DEFAULT_HOST_CANDIDATE, 0))
-        return DEFAULT_HOST_CANDIDATE
-    except OSError:
-        return FALLBACK_HOST
-    finally:
-        probe.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description="ZTR Requests — a web UI for sending requests through a ZTRelay tunnel.")
-    parser.add_argument("--host", default=None, help=f"defaults to {DEFAULT_HOST_CANDIDATE} if this machine has that address, else {FALLBACK_HOST} — see module docstring")
-    parser.add_argument("--port", type=int, default=8994, help="this app's own HTTP port (default: 8994)")
+    parser.add_argument("--host", default="127.0.0.1", help="defaults to 127.0.0.1 (local-machine-only) — see module docstring")
+    parser.add_argument("--port", type=int, default=8089, help="this app's own HTTP port (default: 8089)")
     args = parser.parse_args()
-
-    host = resolve_host(args.host)
 
     # Without this, restarting the server right after stopping it fails
     # with "Address already in use" until the just-closed socket clears
@@ -501,8 +778,8 @@ def main():
     # by default; plain socketserver.ThreadingTCPServer doesn't.
     socketserver.ThreadingTCPServer.allow_reuse_address = True
 
-    with socketserver.ThreadingTCPServer((host, args.port), Handler) as httpd:
-        print(f"Webservice running at http://{host}:{args.port}/")
+    with socketserver.ThreadingTCPServer((args.host, args.port), Handler) as httpd:
+        print(f"Webservice running at http://{args.host}:{args.port}/")
         httpd.serve_forever()
 
 

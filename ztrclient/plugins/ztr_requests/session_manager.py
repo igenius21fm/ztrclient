@@ -23,24 +23,34 @@ class SessionManager:
         self._sessions = {}
         self._lock = threading.Lock()
 
+    # verify/cert are TLS-handshake-level settings (Session-construction
+    # only — ztr_https.Session has no per-call override for them the way
+    # it does for timeout), so a different verify/cert combination against
+    # the same route genuinely needs its own Session, not a shared one
+    # that would silently apply the wrong trust settings to it.
     @staticmethod
-    def _key(config_file, with_timing_defense):
-        return (config_file, bool(with_timing_defense))
+    def _key(config_file, with_timing_defense, verify=True, cert=None):
+        return (config_file, bool(with_timing_defense), verify, cert)
 
-    def get_or_create(self, config_file, with_timing_defense=False):
-        key = self._key(config_file, with_timing_defense)
+    def get_or_create(self, config_file, with_timing_defense=False, verify=True, cert=None):
+        key = self._key(config_file, with_timing_defense, verify, cert)
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
-                session = ztr_https.Session(config_file=config_file, with_timing_defense=with_timing_defense)
+                session = ztr_https.Session(
+                    config_file=config_file,
+                    with_timing_defense=with_timing_defense,
+                    verify=verify,
+                    cert=cert,
+                )
                 self._sessions[key] = session
             return session
 
-    def drop(self, config_file, with_timing_defense=False):
+    def drop(self, config_file, with_timing_defense=False, verify=True, cert=None):
         """Evicts a cached Session (e.g. after a request against it fails)
         so the next request opens fresh tunnels instead of reusing
         connections that may now be wedged."""
-        key = self._key(config_file, with_timing_defense)
+        key = self._key(config_file, with_timing_defense, verify, cert)
         with self._lock:
             session = self._sessions.pop(key, None)
         if session is not None:
@@ -51,11 +61,18 @@ class SessionManager:
         with self._lock:
             items = list(self._sessions.items())
         out = []
-        for (config_file, with_timing_defense), session in items:
+        for (config_file, with_timing_defense, verify, cert), session in items:
             origins = [f"{scheme}://{host}:{port}" for (scheme, host, port) in session._connections]
             out.append({
                 "config_file": config_file,
                 "with_timing_defense": with_timing_defense,
+                "verify": verify,
+                # "client_cert", not "cert" — matches the public field name
+                # everywhere else in the app (composerState/sendOne/etc), so
+                # the connections panel's disconnect button — which just
+                # re-POSTs this exact row back to /api/sessions/drop — hits
+                # the same key /api/sessions/drop already reads.
+                "client_cert": cert,
                 "origins": origins,
             })
         return out

@@ -280,6 +280,25 @@ class Response:
                                  # see _extract_route_info
         self._content = None  # bytes once fully known; None means not (yet) drained
         self._body_chunks = None  # decoded-chunk generator, set only for stream=True responses
+        self._discard = None  # closes this response's connection outright
+                               # instead of pooling it — see abort()
+
+    def abort(self) -> None:
+        """For when headers alone were enough to decide you don't want
+        this body at all (e.g. it turned out to be a large video you're
+        about to fetch through something else instead) — closes the
+        underlying connection for real rather than draining it first.
+        iter_content()/close() drain fully specifically so the connection
+        can go back in the Session's pool afterward; a body abandoned
+        partway through can never be safely pooled (the next request
+        would read this one's leftover bytes), so abort() always closes
+        it instead, even for a keep-alive-capable target."""
+        if self._discard is not None:
+            self._discard()
+            self._discard = None
+        self._body_chunks = None
+        if self._content is None:
+            self._content = b""
 
     def iter_content(self, chunk_size=None):
         """Yields decoded body chunks as they arrive off the wire. Sizes
@@ -517,8 +536,17 @@ def _build_request(method: str, path: str, host: str, headers: dict, body: bytes
     # Connection header). Pass headers={"Connection": "close"} yourself if
     # you specifically want the target to end the connection after one
     # response.
+    # Always computed from the body actually being sent on THIS call, never
+    # trusted from the caller's own headers dict — a caller can easily be
+    # holding a stale Content-Length (e.g. a webservice composer that
+    # reloaded a saved/history entry's headers, or a $$QF$$ batch run whose
+    # body differs per line) that no longer matches the real body length,
+    # which would send a request the target either rejects outright or
+    # truncates/hangs reading.
+    for stale_key in [k for k in hdrs if k.lower() == "content-length"]:
+        del hdrs[stale_key]
     if body:
-        hdrs.setdefault("Content-Length", str(len(body)))
+        hdrs["Content-Length"] = str(len(body))
     for name, value in hdrs.items():
         lines.append(f"{name}: {value}")
     lines.append("")
@@ -658,6 +686,27 @@ class Session:
             else:
                 self._connections[key] = (conn, client)
 
+    def _discard_connection(self, conn, key):
+        """Response.abort()'s actual work — close conn for real and make
+        sure it isn't sitting in the pool. A plain generator .close() on
+        _release_after_stream isn't enough on its own: closing a
+        generator that was never iterated (the common abort() case —
+        headers looked, body never touched) skips its finally block
+        entirely, since the frame never started running, so this pool
+        eviction has to happen independently of that generator's own
+        cleanup rather than relying on it."""
+        try:
+            conn.close()
+        except (OSError, NetworkError):
+            pass
+        # Only evict if this exact connection is what's pooled under
+        # `key` right now — a stream=True response is never pooled ahead
+        # of time, but by the time abort() actually runs, a *different*,
+        # unrelated request to the same origin may have already pooled
+        # its own healthy connection there, which this must not touch.
+        if self._connections.get(key, (None, None))[0] is conn:
+            self._connections.pop(key, None)
+
     def _prepare_body(self, hdrs: dict, data, json, files) -> bytes:
         if files:
             fields = data if isinstance(data, dict) else {}
@@ -790,6 +839,7 @@ class Session:
             response.history = history
             if stream:
                 response._body_chunks = self._release_after_stream(conn, client, key, decoded_chunks, close_after)
+                response._discard = lambda conn=conn, key=key: self._discard_connection(conn, key)
             else:
                 response._content = content
                 if close_after:
