@@ -3,23 +3,25 @@
 # ztr_pg) so they run from anywhere, without a manual shell alias per
 # docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
 # ztrClient.py itself — this is scoped to plugins/ only (which is also
-# where ztr_tunnel_lp.py and ztr_dashboard.py live). Linux/systemd only.
+# where ztr_tunnel_lp.py, ztr_dashboard.py, ztr_https.py, and ztr_requests/
+# live). Linux/systemd only.
 #
 #   ./installer-linux.sh                       install wrappers into ~/.local/bin
 #   ./installer-linux.sh --prefix DIR          install into DIR instead
 #   ./installer-linux.sh --venv-dir DIR        put ztr's own Python venv at DIR instead of ~/.local/share/ztr/venv
 #   ./installer-linux.sh --with-service        also set up ztr_tunnel_lp.py as a systemd --user service
 #   ./installer-linux.sh --with-dashboard      also set up ztr_dashboard.py as a systemd --user service
+#   ./installer-linux.sh --with-requests       also set up ztr_requests (request-composer web UI) as a systemd --user service
 #   ./installer-linux.sh --with-local-ip       also set up a dedicated dummy interface for tunneled sessions
 #   ./installer-linux.sh --local-ip IP         use IP instead of the default 10.10.15.10
 #   ./installer-linux.sh --uninstall           remove the installed wrappers (services, venv, and dummy interface, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up each service, and (if either one, or if --with-local-ip was passed)
-# what IP to use. --with-service/--with-dashboard/--with-local-ip/--local-ip
-# above are for skipping those prompts — non-interactive runs (CI,
-# provisioning scripts, piped input) skip them automatically and just take
-# the flags/defaults given.
+# up each service, and (if any of the three, or if --with-local-ip was
+# passed) what IP to use. --with-service/--with-dashboard/--with-requests/
+# --with-local-ip/--local-ip above are for skipping those prompts —
+# non-interactive runs (CI, provisioning scripts, piped input) skip them
+# automatically and just take the flags/defaults given.
 #
 # What it actually does:
 #   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg} executable — a zip
@@ -30,27 +32,38 @@
 #      installs pycryptodome into it — ztr_tunnel_lp.py imports RelayClient
 #      from ztrClient.py, which needs it. Keeping this in its own venv
 #      instead of --user/system site-packages means it can't clash with
-#      whatever else is installed on your system python3. Both systemd
-#      services (--with-service, --with-dashboard) run using this venv's
-#      interpreter. With --with-dashboard, also offers to install scapy
-#      into it — only needed for the dashboard's live traffic panel.
+#      whatever else is installed on your system python3. All three
+#      systemd services (--with-service, --with-dashboard, --with-requests)
+#      run using this venv's interpreter. With --with-dashboard, also
+#      offers to install scapy into it — only needed for the dashboard's
+#      live traffic panel. With --with-requests, also installs Pillow —
+#      ztr_requests/server.py needs it to sniff/decode image responses.
 #   3. Symlinks the three wrappers into --prefix (default ~/.local/bin),
 #      so `ztr_ssh`/`ztr_forward`/`ztr_pg` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: creates ztr_i0, a real dummy interface (`ip
 #      link add ztr_i0 type dummy`), and binds --local-ip (default
 #      10.10.15.10) to it, so ztr_tunnel_lp.py's per-session listeners (and
-#      the dashboard, if you set it up) have a dedicated interface to bind
-#      to instead of the generic 127.0.0.1 — needs sudo, requires you to
-#      run this yourself. Also installs a system-level systemd unit
-#      (ztr-dummy-if.service) that recreates the interface on every boot,
-#      so this survives a reboot without you having to re-run anything.
+#      the dashboard/requests UI, if you set either up) have a dedicated
+#      interface to bind to instead of the generic 127.0.0.1 — needs sudo,
+#      requires you to run this yourself. Also installs a system-level
+#      systemd unit (ztr-dummy-if.service) that recreates the interface on
+#      every boot, so this survives a reboot without you having to re-run
+#      anything.
 #   5. With --with-service: installs ztr_tunnel_lp.py as a systemd --user
 #      service, prompting for your .ztr config path.
 #   6. With --with-dashboard: installs ztr_dashboard.py as a systemd --user
 #      service the same way — reuses the .ztr config from --with-service
 #      above if you set both up together, otherwise prompts for its own
 #      (or none, if you just want the tunnel/error panels).
+#   7. With --with-requests: installs ztr_requests/server.py (a small
+#      Postman-style web UI for firing one-off requests through an
+#      authorized tunnel) as a systemd --user service, on the same dummy
+#      IP as the dashboard when --with-local-ip is set (else 127.0.0.1) —
+#      deliberately not the open LAN, since a request built there can
+#      carry a route's real identifier/secret_key-backed tunnel. No route
+#      config needed up front; it picks one per request from whatever's in
+#      routes/.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +78,8 @@ WITH_SERVICE=0
 WITH_SERVICE_SET_BY_USER=0
 WITH_DASHBOARD=0
 WITH_DASHBOARD_SET_BY_USER=0
+WITH_REQUESTS=0
+WITH_REQUESTS_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 
@@ -80,7 +95,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,66p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -101,6 +116,11 @@ while [[ $# -gt 0 ]]; do
     --with-dashboard)
       WITH_DASHBOARD=1
       WITH_DASHBOARD_SET_BY_USER=1
+      shift
+      ;;
+    --with-requests)
+      WITH_REQUESTS=1
+      WITH_REQUESTS_SET_BY_USER=1
       shift
       ;;
     --with-local-ip)
@@ -130,6 +150,7 @@ done
 
 SERVICE_UNIT="$HOME/.config/systemd/user/ztr-tunnel-lp.service"
 DASHBOARD_SERVICE_UNIT="$HOME/.config/systemd/user/ztr-dashboard.service"
+REQUESTS_SERVICE_UNIT="$HOME/.config/systemd/user/ztr-requests.service"
 IFACE_NAME="ztr_i0"
 DUMMY_IF_UNIT="/etc/systemd/system/ztr-dummy-if.service"
 
@@ -151,6 +172,16 @@ if [[ "$WITH_DASHBOARD_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Set up ztr_dashboard.py as a persistent systemd --user service? [y/N]: " WITH_DASHBOARD_ANSWER
   case "$WITH_DASHBOARD_ANSWER" in
     [yY]*) WITH_DASHBOARD=1 ;;
+  esac
+fi
+
+# Same idea again — a separate yes/no, not folded into the dashboard
+# prompt, since you might want the request UI without the dashboard or
+# vice versa.
+if [[ "$WITH_REQUESTS_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Set up ztr_requests (Postman-style request UI) as a persistent systemd --user service? [y/N]: " WITH_REQUESTS_ANSWER
+  case "$WITH_REQUESTS_ANSWER" in
+    [yY]*) WITH_REQUESTS=1 ;;
   esac
 fi
 
@@ -231,6 +262,14 @@ uninstall() {
     log_info "stopping and removing the ztr-dashboard systemd service ..."
     systemctl --user disable --now ztr-dashboard.service >/dev/null 2>&1 || true
     rm -f "$DASHBOARD_SERVICE_UNIT"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    log_ok "service removed."
+  fi
+
+  if [[ -f "$REQUESTS_SERVICE_UNIT" ]]; then
+    log_info "stopping and removing the ztr-requests systemd service ..."
+    systemctl --user disable --now ztr-requests.service >/dev/null 2>&1 || true
+    rm -f "$REQUESTS_SERVICE_UNIT"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     log_ok "service removed."
   fi
@@ -355,6 +394,19 @@ if [[ "$WITH_DASHBOARD" -eq 1 ]]; then
     else
       log_warn "couldn't grant capture capability to $VENV_PY — live traffic capture will stay off."
     fi
+  fi
+fi
+
+# Only needed by ztr_requests/server.py, to sniff/decode image responses
+# and pull EXIF metadata out of them — everything else in it works
+# without Pillow, but the response panel would break on any image body.
+if [[ "$WITH_REQUESTS" -eq 1 ]]; then
+  if "$VENV_PY" -c "import PIL" >/dev/null 2>&1; then
+    log_ok "Pillow already installed in the venv."
+  elif "$VENV_PY" -m pip install --quiet Pillow; then
+    log_ok "Pillow installed."
+  else
+    log_warn "couldn't install Pillow — ztr_requests will still start, but image responses will fail to render."
   fi
 fi
 
@@ -579,6 +631,59 @@ EOF
     log_ok "service installed and started: ztr-dashboard.service"
     echo "${C_DIM}    systemctl --user status ztr-dashboard.service${C_RESET}"
     echo "${C_DIM}    journalctl --user -u ztr-dashboard.service -f${C_RESET}"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+if [[ "$WITH_REQUESTS" -eq 1 ]]; then
+  log_info "setting up ztr_requests as a systemd --user service ..."
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log_err "systemctl not found — this installer is Linux/systemd-specific."
+    log_warn "run it standalone instead: $VENV_PY $SCRIPT_DIR/plugins/ztr_requests/server.py"
+  elif [[ -z "${XDG_RUNTIME_DIR:-}" ]] || ! systemctl --user show-environment >/dev/null 2>&1; then
+    # Same "no systemd --user session" case as --with-service above.
+    log_err "no systemd --user session available for this account (XDG_RUNTIME_DIR unset, or its D-Bus isn't reachable)."
+    log_warn "if you reached this shell via su/sudo into this user: log in directly as them instead (SSH or"
+    log_warn "console) and re-run. If you're already logged in directly: try 'loginctl enable-linger \$USER',"
+    log_warn "then log out and back in. If systemd doesn't run here at all (containers, WSL without systemd"
+    log_warn "enabled), --with-requests can't work — run it yourself instead, in the foreground:"
+    log_warn "    $VENV_PY $SCRIPT_DIR/plugins/ztr_requests/server.py"
+  else
+    # No .ztr config prompt here, unlike --with-service/--with-dashboard —
+    # ztr_requests picks a route per request from whatever's already in
+    # routes/, via its own UI, rather than being bound to one config at
+    # startup.
+    REQUESTS_EXEC="plugins/ztr_requests/server.py"
+
+    # Same reasoning as the dashboard: its own runtime fallback
+    # (127.0.0.1) covers a machine with no dummy interface, but tell it
+    # explicitly when this invocation is actually setting one up (or it's
+    # already there) instead of leaving it to guess.
+    if [[ "$WITH_LOCAL_IP" -eq 1 ]]; then
+      REQUESTS_EXEC="$REQUESTS_EXEC --host $LOCAL_IP"
+    fi
+
+    mkdir -p "$(dirname "$REQUESTS_SERVICE_UNIT")"
+    cat > "$REQUESTS_SERVICE_UNIT" <<EOF
+[Unit]
+Description=ZTRelay request-composer web UI
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$VENV_PY $REQUESTS_EXEC
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now ztr-requests.service
+    log_ok "service installed and started: ztr-requests.service"
+    echo "${C_DIM}    systemctl --user status ztr-requests.service${C_RESET}"
+    echo "${C_DIM}    journalctl --user -u ztr-requests.service -f${C_RESET}"
   fi
 fi
 

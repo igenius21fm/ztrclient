@@ -2,13 +2,17 @@
 
 Everything here builds on `ztrClient.py` (one directory up). Three thin CLI
 wrappers — `ztr_ssh`, `ztr_forward`, `ztr_pg` — drive tunnels through a
-shared background service, `ztr_tunnel_lp.py`; `ztr_dashboard.py` is a
-separate, standalone tool with no dependency on that service.
+shared background service, `ztr_tunnel_lp.py`; `ztr_dashboard.py` and
+`ztr_requests/` are separate, standalone tools with no dependency on that
+service. `ztr_https.py` is a library the others (and your own scripts) can
+import — not something you run on its own.
 
 The normal way to get all of this installed and on your `PATH` is the
-top-level `installer-linux.sh` — see the repo's [main README](../../README.md)
-for that. This one documents what each piece actually does, either for
-running something by hand or for understanding what the installer set up
+top-level [installer-linux.sh](../installer-linux.sh) — see the repo's
+[main README](../../README.md) for that (`--with-service`,
+`--with-dashboard`, `--with-requests` set up the three optional background
+services below). This one documents what each piece actually does, either
+for running something by hand or for understanding what the installer set up
 for you.
 
 ## ztr_tunnel_lp.py — the shared tunnel service
@@ -146,8 +150,67 @@ python3 plugins/ztr_dashboard.py --config-file route.ztr
 
 `static/` next to this file is its frontend — plain CSS/JS, no build step.
 
+## ztr_https.py — HTTP(S) client library over a ZTRelay tunnel
+
+Not a tool you run — a library `import ztr_https` gives you, `requests`-shaped:
+
+```python
+import ztr_https
+
+resp = ztr_https.get("https://example.com/path", config_file="route.ztr")
+print(resp.status_code, resp.json())
+
+with ztr_https.Session(config_file="route.ztr") as s:
+    s.get("https://example.com/a")
+    s.get("https://example.com/b")  # same origin -> tunnel/TLS connection reused
+```
+
+Handles tunnel authorization and the entry hop's wire format for you, drives
+TLS by hand over the tunnel (`ssl.MemoryBIO`, not a real socket — there's no
+code path where it could bypass the tunnel even by accident), and hands the
+target domain to `RelayClient` exactly as given rather than resolving it
+locally — resolution happens at the exit hop, over the registry, so a
+client-side DNS lookup never leaks which domain you're about to reach.
+Supports redirects, cookies (including from an intermediate redirect hop),
+streaming responses, multipart uploads, an explicit `port=` override for a
+target not on 443/80, and exposes what actually happened on the wire
+(`resp.tls_info` — negotiated protocol/cipher/peer certificate,
+`resp.route_info` — the hop chain the request ran through) rather than
+just the response body. `ztr_requests/` (below) is the reference consumer.
+
+## ztr_requests/ — request-composer web UI
+
+A small Postman-style local web app for firing one-off HTTP/HTTPS requests
+straight through an authorized tunnel to their own real target, built on
+`ztr_https.py`. Point it at a route file (or several — supports multiple
+named `{{var}}`-substitution environments, so switching targets doesn't
+mean retyping the same variable names with different values), compose a
+request, hit Send, see the response — headers, cookies, TLS certificate
+details, the relay path it actually took, and (for an image response)
+decoded EXIF metadata.
+
+```bash
+python3 plugins/ztr_requests/server.py
+```
+
+| Flag | Effect |
+|---|---|
+| `--host` | This app's own bind address. Defaults to `10.10.15.10` if this machine has that address, else `127.0.0.1` — deliberately not the open LAN by default, since a request built here can carry a route's real identifier/secret_key-backed tunnel plus whatever headers/body you type into it. |
+| `--port` | This app's own HTTP port. Default `8994`. |
+
+No `--config-file` — unlike the dashboard, it isn't tied to one route at
+startup; pick whichever's in `routes/` per request, from the UI itself.
+`static/` next to `server.py` is its frontend (plain CSS/JS, no build
+step); `session_manager.py`/`history_store.py`/`environment_store.py`/
+`collection_store.py` are its own small sqlite-backed state (one
+`ztr_https.Session` per route+timing-defense combination, request history,
+named environments, saved requests) — all local to this directory, no
+shared database with anything else here.
+
 ## Layout
 
 - `ztr_tunnel_lp.py` — the shared tunnel service every wrapper below talks to.
 - `ztr_ssh`, `ztr_forward`, `ztr_pg` — CLI wrappers around it.
 - `ztr_dashboard.py` + `static/` — the standalone local dashboard.
+- `ztr_https.py` — HTTP(S)-over-tunnel client library.
+- `ztr_requests/` — the standalone request-composer web UI, built on it.

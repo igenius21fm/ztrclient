@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZTR Requests</title>
+<link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="icon-send" viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 14h10l1-14"/></symbol>
+  <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></symbol>
+  <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/></symbol>
+  <symbol id="icon-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="icon-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></symbol>
+  <symbol id="icon-braces" viewBox="0 0 24 24"><path d="M8 3H7a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2v4a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2v4a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2h-1"/></symbol>
+  <symbol id="icon-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></symbol>
+  <symbol id="icon-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2M15 8V2"/><path d="M18 8H6a2 2 0 0 0-2 2v1a8 8 0 0 0 16 0V10a2 2 0 0 0-2-2Z"/></symbol>
+  <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+</svg>
+
+<datalist id="headerNameOptions">
+  <option value="Accept">
+  <option value="Accept-Encoding">
+  <option value="Accept-Language">
+  <option value="Authorization">
+  <option value="Cache-Control">
+  <option value="Connection">
+  <option value="Content-Type">
+  <option value="Content-Length">
+  <option value="Cookie">
+  <option value="DNT">
+  <option value="Host">
+  <option value="If-Modified-Since">
+  <option value="If-None-Match">
+  <option value="Origin">
+  <option value="Pragma">
+  <option value="Referer">
+  <option value="Sec-Ch-Ua">
+  <option value="Sec-Ch-Ua-Mobile">
+  <option value="Sec-Ch-Ua-Platform">
+  <option value="Sec-Fetch-Dest">
+  <option value="Sec-Fetch-Mode">
+  <option value="Sec-Fetch-Site">
+  <option value="Sec-Fetch-User">
+  <option value="Upgrade-Insecure-Requests">
+  <option value="User-Agent">
+  <option value="X-Api-Key">
+  <option value="X-Auth-Token">
+  <option value="X-CSRF-Token">
+  <option value="X-Forwarded-For">
+  <option value="X-Requested-With">
+</datalist>
+
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><svg class="icon"><use href="#icon-bolt"></use></svg> ZTR Requests</div>
+
+    <section class="side-section">
+      <div class="side-eyebrow">Connection</div>
+
+      <label class="field-label" for="routeSelect">Route config</label>
+      <select class="field-input" id="routeSelect"></select>
+
+      <label class="field-label" for="targetPort">Port <span class="hint">defaults to 443 (https) / 80 (http)</span></label>
+      <input class="field-input" id="targetPort" type="number" min="1" max="65535" placeholder="443">
+
+      <details class="advanced">
+        <summary>Advanced <svg class="icon chevron"><use href="#icon-chevron"></use></svg></summary>
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="withTimingDefense">
+          <label class="form-check-label" for="withTimingDefense">Timing-correlation defense</label>
+        </div>
+      </details>
+    </section>
+
+    <section class="side-section">
+      <details class="advanced">
+        <summary>
+          <span class="advanced-title"><svg class="icon"><use href="#icon-braces"></use></svg> Variables <span class="hint">{{key}} substitution</span></span>
+          <svg class="icon chevron"><use href="#icon-chevron"></use></svg>
+        </summary>
+        <div class="env-selector-row">
+          <select class="field-input" id="envSelect"></select>
+          <button type="button" class="icon-btn" id="deleteEnvBtn" title="Delete environment" aria-label="Delete environment">
+            <svg class="icon"><use href="#icon-trash"></use></svg>
+          </button>
+        </div>
+        <div class="env-actions-row">
+          <button type="button" class="ghost-btn small" id="addEnvBtn">
+            <svg class="icon"><use href="#icon-plus"></use></svg> New environment
+          </button>
+          <button type="button" class="ghost-btn small" id="renameEnvBtn">Rename</button>
+        </div>
+        <div id="varRows" class="header-rows"></div>
+        <button class="ghost-btn" id="addVarBtn">
+          <svg class="icon"><use href="#icon-plus"></use></svg> Add variable
+        </button>
+      </details>
+    </section>
+
+    <section class="side-section sidebar-panels">
+      <div class="side-tabs" id="sidebarTabs">
+        <button class="side-tab active" data-side="history">History</button>
+        <button class="side-tab" data-side="saved">Saved</button>
+        <button class="side-tab" data-side="conns">Conns</button>
+      </div>
+
+      <div class="side-panel active" id="side-history">
+        <div class="side-panel-toolbar">
+          <button class="icon-btn" id="clearHistoryBtn" title="Clear history" aria-label="Clear history">
+            <svg class="icon"><use href="#icon-trash"></use></svg>
+          </button>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </div>
+
+      <div class="side-panel" id="side-saved">
+        <div id="savedList" class="history-list"></div>
+      </div>
+
+      <div class="side-panel" id="side-conns">
+        <div class="side-panel-toolbar">
+          <button class="icon-btn" id="refreshPoolsBtn" title="Refresh" aria-label="Refresh">
+            <svg class="icon"><use href="#icon-plug"></use></svg>
+          </button>
+        </div>
+        <div id="poolsList" class="history-list"></div>
+      </div>
+    </section>
+  </aside>
+
+  <main id="main">
+    <div class="request-bar">
+      <button id="newRequestBtn" class="icon-btn new-request-btn" title="New request" aria-label="New request">
+        <svg class="icon"><use href="#icon-plus"></use></svg>
+      </button>
+      <select id="methodSelect" class="method-select method-GET">
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+        <option value="PUT">PUT</option>
+        <option value="PATCH">PATCH</option>
+        <option value="DELETE">DELETE</option>
+      </select>
+      <input id="urlInput" class="url-input" placeholder="https://api.example.com/v1/resource" autocomplete="off">
+      <button id="saveBtn" class="ghost-btn save-btn" title="Save to collection">
+        <svg class="icon"><use href="#icon-save"></use></svg> Save
+      </button>
+      <button id="sendBtn" class="send-btn">
+        <svg class="icon"><use href="#icon-send"></use></svg> Send
+      </button>
+    </div>
+
+    <div class="tabs" id="requestTabs">
+      <button class="tab" data-tab="params">Params <span class="tab-count" id="paramCount"></span></button>
+      <button class="tab" data-tab="auth">Auth <span class="tab-count" id="authBadge"></span></button>
+      <button class="tab active" data-tab="headers">Headers <span class="tab-count" id="headerCount"></span></button>
+      <button class="tab" data-tab="body">Body</button>
+    </div>
+
+    <div class="tab-panel" id="tab-params">
+      <div id="paramRows" class="header-rows"></div>
+      <button class="ghost-btn" id="addParamBtn">
+        <svg class="icon"><use href="#icon-plus"></use></svg> Add param
+      </button>
+    </div>
+
+    <div class="tab-panel" id="tab-auth">
+      <label class="field-label" for="authType">Type</label>
+      <select class="field-input auth-select" id="authType">
+        <option value="none">No auth</option>
+        <option value="bearer">Bearer token</option>
+        <option value="basic">Basic auth</option>
+      </select>
+
+      <div id="authBearerFields" class="auth-fields" style="display:none">
+        <label class="field-label" for="authBearerToken">Token</label>
+        <input class="field-input" id="authBearerToken" placeholder="{{api_token}}" autocomplete="off">
+      </div>
+
+      <div id="authBasicFields" class="auth-fields" style="display:none">
+        <label class="field-label" for="authBasicUser">Username</label>
+        <input class="field-input" id="authBasicUser" autocomplete="off">
+        <label class="field-label" for="authBasicPass">Password</label>
+        <input class="field-input" id="authBasicPass" type="password" autocomplete="off">
+      </div>
+      <p class="hint auth-hint">Applied as an <code>Authorization</code> header at send time — it won't show up in the Headers tab.</p>
+    </div>
+
+    <div class="tab-panel active" id="tab-headers">
+      <div id="headerRows" class="header-rows"></div>
+      <button class="ghost-btn" id="addHeaderBtn">
+        <svg class="icon"><use href="#icon-plus"></use></svg> Add header
+      </button>
+      <p class="hint auth-hint">A browser-like <code>User-Agent</code> is sent automatically unless you set your own here.</p>
+    </div>
+
+    <div class="tab-panel" id="tab-body">
+      <div class="response-body-toolbar">
+        <button class="ghost-btn small" id="formatJsonBtn">
+          <svg class="icon"><use href="#icon-braces"></use></svg> Format JSON
+        </button>
+      </div>
+      <textarea id="bodyInput" class="body-input" placeholder="Raw request body — JSON, form data, whatever the target expects" spellcheck="false"></textarea>
+    </div>
+
+    <section class="response-panel">
+      <div class="response-meta" id="responseMeta">
+        <span class="status-pill idle" id="statusPill">Ready</span>
+        <span class="response-stat" id="timingStat"></span>
+        <span class="response-stat" id="sizeStat"></span>
+      </div>
+
+      <div class="tabs" id="responseTabs">
+        <button class="tab active" data-rtab="body">Body</button>
+        <button class="tab" data-rtab="headers">Headers</button>
+        <button class="tab" data-rtab="security">Security <span class="tab-count" id="securityCount"></span></button>
+        <button class="tab" data-rtab="metadata" id="metadataTab" style="display:none">Metadata</button>
+      </div>
+
+      <div class="tab-panel active" id="rtab-body">
+        <div class="response-body-toolbar" id="responseBodyToolbar">
+          <button class="ghost-btn small" id="copyBodyBtn">
+            <svg class="icon"><use href="#icon-copy"></use></svg> Copy
+          </button>
+        </div>
+        <pre class="response-body" id="responseBody">Send a request to see the response here.</pre>
+        <div class="response-image-wrap" id="responseImageWrap" style="display:none">
+          <img class="response-image" id="responseImage" alt="Response image">
+        </div>
+      </div>
+      <div class="tab-panel" id="rtab-headers">
+        <div class="headers-section-label">Request</div>
+        <pre class="response-body" id="requestHeaders"></pre>
+        <div class="headers-section-label">Response</div>
+        <div id="cookieBar"></div>
+        <pre class="response-body" id="responseHeaders"></pre>
+      </div>
+      <div class="tab-panel" id="rtab-security">
+        <div class="tls-cert-card" id="routeInfoCard" style="display:none"></div>
+        <div class="tls-cert-card" id="tlsCertCard" style="display:none"></div>
+        <div class="security-view" id="responseSecurity">Send a request to see its headers analyzed here.</div>
+      </div>
+      <div class="tab-panel" id="rtab-metadata">
+        <div class="metadata-view" id="responseMetadata"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/vendor/jquery.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
