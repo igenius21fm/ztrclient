@@ -173,10 +173,20 @@ locally — resolution happens at the exit hop, over the registry, so a
 client-side DNS lookup never leaks which domain you're about to reach.
 Supports redirects, cookies (including from an intermediate redirect hop),
 streaming responses, multipart uploads, an explicit `port=` override for a
-target not on 443/80, and exposes what actually happened on the wire
-(`resp.tls_info` — negotiated protocol/cipher/peer certificate,
-`resp.route_info` — the hop chain the request ran through) rather than
-just the response body. `ztr_requests/` (below) is the reference consumer.
+target not on 443/80, a per-request `timeout=` (`Session`'s own default is
+30s), `verify=False`/a CA bundle path to control certificate checking, and
+`cert=` for a client certificate. `Response.abort()` closes a `stream=True`
+response's connection outright without draining it, for when headers alone
+(`Content-Type`) are enough to decide the body isn't worth downloading — a
+video response never gets its body pulled through the tunnel at all this
+way. Content-Length is always computed from the body actually being sent on
+a given call, never trusted from a caller-supplied header, so a stale value
+(e.g. from a reloaded saved request, or a later line in a batch run with a
+different body) can't silently truncate or corrupt the request. Exposes
+what actually happened on the wire (`resp.tls_info` — negotiated
+protocol/cipher/peer certificate, `resp.route_info` — the hop chain the
+request ran through) rather than just the response body. `ztr_requests/`
+(below) is the reference consumer.
 
 ## ztr_requests/ — request-composer web UI
 
@@ -185,9 +195,24 @@ straight through an authorized tunnel to their own real target, built on
 `ztr_https.py`. Point it at a route file (or several — supports multiple
 named `{{var}}`-substitution environments, so switching targets doesn't
 mean retyping the same variable names with different values), compose a
-request, hit Send, see the response — headers, cookies, TLS certificate
-details, the relay path it actually took, and (for an image response)
-decoded EXIF metadata.
+request, hit Send, see the response — headers, cookies, a Relay Path
+diagram and TLS certificate details, and (for an image response) decoded
+EXIF metadata. A video response streams back through a Range-aware GET
+instead of being buffered through the same request/response cycle as
+everything else. Per-request timeout, TLS verification, and client
+certificate are all composer options, not just `ztr_https.py` defaults.
+
+Attach a `.txt` query file (one value per line) and reference it anywhere
+in the request as `$$QF$$` to fire one request per line instead of one.
+`$$QF::<...>$$` — `code`/`body_contains`/`headers[Name]` predicates, `=
+!= >= <= > <`, combined with `AND`/`OR`/parens — either stops the run
+early on a match, or (`$$QF::<...>::om$$`) keeps running every line but
+only saves the matching ones. Full syntax is documented in-app (the `?`
+button next to "Query file…"). Batch runs land in their own **Batch** tab,
+separate from **History**: history's row only ever kept enough to
+repopulate the composer, never the full response a batch line needs, so
+by the time a run finished only the last line's detail was still visible
+anywhere — Batch keeps everything for every line.
 
 ```bash
 python3 plugins/ztr_requests/server.py
@@ -195,17 +220,18 @@ python3 plugins/ztr_requests/server.py
 
 | Flag | Effect |
 |---|---|
-| `--host` | This app's own bind address. Defaults to `10.10.15.10` if this machine has that address, else `127.0.0.1` — deliberately not the open LAN by default, since a request built here can carry a route's real identifier/secret_key-backed tunnel plus whatever headers/body you type into it. |
-| `--port` | This app's own HTTP port. Default `8994`. |
+| `--host` | This app's own bind address. Default `127.0.0.1` — local-machine-only, deliberately not the open LAN by default, since a request built here can carry a route's real identifier/secret_key-backed tunnel plus whatever headers/body you type into it. |
+| `--port` | This app's own HTTP port. Default `8089`. |
 
 No `--config-file` — unlike the dashboard, it isn't tied to one route at
 startup; pick whichever's in `routes/` per request, from the UI itself.
 `static/` next to `server.py` is its frontend (plain CSS/JS, no build
 step); `session_manager.py`/`history_store.py`/`environment_store.py`/
-`collection_store.py` are its own small sqlite-backed state (one
-`ztr_https.Session` per route+timing-defense combination, request history,
-named environments, saved requests) — all local to this directory, no
-shared database with anything else here.
+`collection_store.py`/`batch_store.py` are its own small sqlite-backed
+state (one `ztr_https.Session` per route+timing-defense+verify+cert
+combination, request history, named environments, saved requests, batch
+run results) — all local to this directory, no shared database with
+anything else here.
 
 ## Layout
 
