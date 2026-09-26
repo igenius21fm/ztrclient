@@ -1,5 +1,13 @@
-from utils.crypt_bot import CryptBot
 import os
+import sys
+
+try:
+    from utils.crypt_bot import CryptBot
+except ImportError:
+    print("pycryptodome isn't installed for this Python interpreter.")
+    print("Run ./launcher.sh instead of calling launcher.py directly — it")
+    print("creates ztr's venv (with pycryptodome in it) and runs this for you.")
+    sys.exit(1)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
