@@ -212,7 +212,7 @@ def sign_nonce(nonce):
             pathPublicKey=os.path.join(_ZTR_CLIENT_DIR, "publicKey.pem"),
             pathRecipientPublicKey="",
         )
-        crypt.create_keys(rsa_size=2048, reuse=True)
+        crypt.create_keys(rsa_size=3072, reuse=True)
         with open(crypt.pathPublicKey) as f:
             public_key = f.read()
         signature = crypt.sign_(nonce)

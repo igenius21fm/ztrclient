@@ -12,8 +12,8 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 crypt = CryptBot(
-            pathPrivateKey=f"{SCRIPT_DIR}/privateKey3072.pem",
-            pathPublicKey=f"{SCRIPT_DIR}/publicKey3072.pem",
+            pathPrivateKey=f"{SCRIPT_DIR}/privateKey.pem",
+            pathPublicKey=f"{SCRIPT_DIR}/publicKey.pem",
             pathRecipientPublicKey=""
         )
 crypt.create_keys(rsa_size=3072, reuse=True)
