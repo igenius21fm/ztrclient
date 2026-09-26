@@ -143,31 +143,35 @@ your key is verified, or running the client before the config is in place)
 is the single most common way to get stuck. Each step links to its
 [Troubleshooting](#troubleshooting) entry.
 
-**1. Run the installer** (see [Install](#install) above) — it needs to run
-first: it's what creates the venv `launcher.py` and every plugin depend on,
-and the `routes/` folder your config goes into later.
-→ Stuck here? See [Installing](#installing).
-
-**2. Register an RSA key.** In your dashboard's Keys panel, click **Nonce**
-to get a one-time challenge, then sign it — **using the venv the installer
-just set up**, not your system `python3`:
+**1. Register an RSA key.** In your dashboard's Keys panel, click **Nonce**
+to get a one-time challenge, then:
 
 ```bash
-~/.local/share/ztr/venv/bin/python3 launcher.py
+./launcher.sh
 ```
 
-It prints your public key, then prompts `Nonce To Sign:` — paste in the
-nonce the panel just gave you. It prints back a signature (hex); paste
-*that*, plus the public key it printed and your account's secret key, into
-the form and submit. It reuses the same keypair every time you run it,
-generating one on first run if none exists yet (`privateKey.pem` /
-`publicKey.pem`, next to `ztrClient.py` — unique per install, never shipped
-in this repo).
+The first time you run this, it also creates ztr's dedicated Python venv
+(default `~/.local/share/ztr/venv`) and installs `pycryptodome` into it —
+the same venv the installer (step 3 below) reuses afterward instead of
+creating a second one, so this only ever happens once regardless of which
+you run first. It prints your public key, then prompts `Nonce To Sign:` —
+paste in the nonce the panel just gave you. It prints back a signature
+(hex); paste *that*, plus the public key it printed and your account's
+secret key, into the form and submit. It reuses the same keypair every
+time you run it, generating one on first run if none exists yet
+(`privateKey.pem` / `publicKey.pem`, next to `ztrClient.py` — unique per
+install, never shipped in this repo).
 → Stuck here? See [Registering a key](#registering-a-key).
 
-**3. Create a route, bound to that key.** In the Routes panel, pick the key
+**2. Create a route, bound to that key.** In the Routes panel, pick the key
 you just registered, an exit country, and a hop count.
 → Stuck here? See [Creating a route](#creating-a-route).
+
+**3. Run the installer** (see [Install](#install) above) — creates the
+`routes/` folder your config goes into next, symlinks the plugin wrappers
+onto your `PATH`, and reuses the exact venv `launcher.sh` already set up in
+step 1 rather than creating its own.
+→ Stuck here? See [Installing](#installing).
 
 **4. Download the route's config and place it correctly.** Click
 **Download .ztr** on the route, then:
@@ -177,14 +181,14 @@ mv ~/Downloads/<name>.ztr ztrclient/routes/
 ```
 
 Open it and replace the `"secret_key": "<your secret_key>"` placeholder
-with your real account secret key (the same one used in step 2 — shown
+with your real account secret key (the same one used in step 1 — shown
 once at account registration, or after **Account → Regenerate secret
 key**) — the server only ever stores a hash of it, so it can't fill this
 in for you.
 → Stuck here? See [The config file](#the-config-file).
 
 **5. Run it.** Easiest: use one of the plugin wrappers directly — after
-step 1, these are already on your `PATH`. See
+step 3, these are already on your `PATH`. See
 [plugins/README.md](ztrclient/plugins/README.md) for what `ztr_ssh` and its siblings
 (`ztr_forward`, `ztr_pg`) each actually do, flag by flag:
 
@@ -211,6 +215,18 @@ for exactly how. Pass one explicitly (`port=22`) only if you have a reason
 to pin a specific lane. Run either way with the venv's interpreter, same as
 everything else here: `~/.local/share/ztr/venv/bin/python3 your_script.py`.
 
+Tip: add this to your shell rc (`~/.bashrc`/`~/.zshrc`) instead of typing
+that full interpreter path every time you want to run something ad hoc
+against this venv:
+
+```bash
+alias ztrvenv='source ~/.local/share/ztr/venv/bin/activate'
+```
+
+(adjust the path first if you used `--venv-dir`/`VENV_DIR` to put the venv
+somewhere else). Run `ztrvenv` once per shell session, then just
+`python3 your_script.py` works directly — `deactivate` to leave it.
+
 ## Troubleshooting
 
 ### Installing
@@ -228,13 +244,16 @@ the [latest release](https://github.com/igenius21fm/ztrclient/releases/latest).
 **`couldn't create the venv — ... sudo apt install python3-venv`** (Linux)
 — Debian/Ubuntu split the stdlib `venv` module into its own package; the
 installer already tells you the exact command, just run it and re-run the
-installer.
+installer (or `launcher.sh`, if that's what you ran first — same message,
+same fix).
 
 ### Registering a key
 
-**`ModuleNotFoundError: No module named 'Crypto'`** running `launcher.py`
-— you used your system `python3` instead of the venv's. Use
-`~/.local/share/ztr/venv/bin/python3 launcher.py` instead.
+**`pycryptodome isn't installed for this Python interpreter`** printed by
+`launcher.py` — you ran `launcher.py` directly (with your system `python3`,
+or some other interpreter that doesn't have it) instead of `./launcher.sh`.
+Run `./launcher.sh` instead — it creates ztr's venv (with `pycryptodome` in
+it, if it isn't already there) and runs `launcher.py` through that for you.
 
 **`invalid_nonce` / "Nonce is unknown, already used, or expired"** — nonces
 are single-use and expire 5 minutes after you click **Nonce**. If you
@@ -257,7 +276,7 @@ invalidates the old one).
 ### Creating a route
 
 **`invalid_pubkey` / "That key isn't a verified key on your account"** —
-either your key registration from step 2 didn't actually succeed (check the
+either your key registration from step 1 didn't actually succeed (check the
 Keys panel — it should be listed there), or you're picking a key that's
 since been revoked.
 
@@ -302,7 +321,11 @@ configs in it are left alone.
 - `ztrClient.py` — the core relay client (`RelayConfig`/`RelayClient`).
 - `launcher.py` — standalone tool for signing a dashboard nonce with your
   RSA key (see [Getting connected](#getting-connected)) — not the client
-  entry point itself.
+  entry point itself. Needs `pycryptodome`; run it through `launcher.sh`
+  (below), not directly, unless you already have a venv with that in it.
+- `launcher.sh` — bootstraps ztr's venv (same one the installer uses) and
+  runs `launcher.py` through it — the one thing you need before a
+  `route.ztr` exists at all, so it works standalone, without the installer.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_tunnel_lp.py` (the
   persistent tunnel service target), and `ztr_dashboard.py` (the local
   tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
