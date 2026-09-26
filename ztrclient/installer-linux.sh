@@ -292,6 +292,8 @@ uninstall() {
       local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
       grep -vxF "$alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     done
+    local venv_alias_line="alias ztrvenv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
+    grep -vxF "$venv_alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     mv "$tmp_rc" "$rc_file"
     log_ok "removed from $rc_file."
   fi
@@ -433,21 +435,45 @@ for name in "${WRAPPERS[@]}"; do
   log_ok "$name -> $target"
 done
 
+# Two independent things can each need adding to the shell rc file: PATH
+# (plus the wrapper aliases, bundled with it as before) and a `ztrvenv`
+# alias for activating ztr's own venv directly — useful regardless of
+# whether PREFIX is already on PATH, so it's checked on its own rather
+# than being skipped along with the PATH block whenever that's already
+# set up (e.g. re-running the installer after an earlier install already
+# added PATH, but before this alias existed).
+RC_FILE="$(detect_rc_file)"
+PATH_LINE="export PATH=\"$PREFIX:\$PATH\"  # added by ztrclient installer"
+VENV_ALIAS_LINE="alias ztrvenv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
+
+NEED_PATH=1
 case ":$PATH:" in
-  *":$PREFIX:"*)
-    log_ok "$PREFIX is already on your PATH."
-    ;;
-  *)
-    RC_FILE="$(detect_rc_file)"
-    PATH_LINE="export PATH=\"$PREFIX:\$PATH\"  # added by ztrclient installer"
-    ADD_TO_RC=0
-    if [[ -t 0 ]]; then
-      read -r -p "$PREFIX isn't on your PATH yet — add PATH + shell aliases for ztr_ssh/ztr_forward/ztr_pg to $RC_FILE? [y/N]: " ADD_TO_RC_ANSWER
-      case "$ADD_TO_RC_ANSWER" in
-        [yY]*) ADD_TO_RC=1 ;;
-      esac
-    fi
-    if [[ "$ADD_TO_RC" -eq 1 ]]; then
+  *":$PREFIX:"*) NEED_PATH=0 ;;
+esac
+
+NEED_VENV_ALIAS=1
+if [[ -f "$RC_FILE" ]] && grep -qxF "$VENV_ALIAS_LINE" "$RC_FILE" 2>/dev/null; then
+  NEED_VENV_ALIAS=0
+fi
+
+if [[ "$NEED_PATH" -eq 0 ]] && [[ "$NEED_VENV_ALIAS" -eq 0 ]]; then
+  log_ok "$PREFIX is already on your PATH, and $RC_FILE already has the ztrvenv alias."
+else
+  RC_PROMPT="add to $RC_FILE:"
+  [[ "$NEED_PATH" -eq 1 ]] && RC_PROMPT="$RC_PROMPT PATH + aliases for ztr_ssh/ztr_forward/ztr_pg,"
+  [[ "$NEED_VENV_ALIAS" -eq 1 ]] && RC_PROMPT="$RC_PROMPT a 'ztrvenv' alias to activate ztr's venv directly,"
+  RC_PROMPT="${RC_PROMPT%,}?"
+
+  ADD_TO_RC=0
+  if [[ -t 0 ]]; then
+    read -r -p "$RC_PROMPT [y/N]: " ADD_TO_RC_ANSWER
+    case "$ADD_TO_RC_ANSWER" in
+      [yY]*) ADD_TO_RC=1 ;;
+    esac
+  fi
+
+  if [[ "$ADD_TO_RC" -eq 1 ]]; then
+    if [[ "$NEED_PATH" -eq 1 ]]; then
       if grep -qxF "$PATH_LINE" "$RC_FILE" 2>/dev/null; then
         log_ok "$RC_FILE already has this PATH export."
       else
@@ -459,16 +485,22 @@ case ":$PATH:" in
           echo "$alias_line" >> "$RC_FILE"
         fi
       done
-      log_ok "added PATH + aliases to $RC_FILE — open a new shell (or run: source $RC_FILE) to pick it up."
-    else
-      log_warn "$PREFIX is not on your PATH yet — add this to your shell rc file:"
+    fi
+    if [[ "$NEED_VENV_ALIAS" -eq 1 ]]; then
+      { echo ""; echo "$VENV_ALIAS_LINE"; } >> "$RC_FILE"
+    fi
+    log_ok "updated $RC_FILE — open a new shell (or run: source $RC_FILE) to pick it up."
+  else
+    log_warn "declined — add this to your shell rc file yourself if you want it:"
+    if [[ "$NEED_PATH" -eq 1 ]]; then
       echo "${C_DIM}    $PATH_LINE${C_RESET}"
       for name in "${WRAPPERS[@]}"; do
         echo "${C_DIM}    alias $name=\"$PLUGINS_DIR/$name\"${C_RESET}"
       done
     fi
-    ;;
-esac
+    [[ "$NEED_VENV_ALIAS" -eq 1 ]] && echo "${C_DIM}    $VENV_ALIAS_LINE${C_RESET}"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 if [[ "$WITH_LOCAL_IP" -eq 1 ]]; then

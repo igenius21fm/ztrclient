@@ -56,7 +56,9 @@ normal install. Under the hood, it:
 3. Creates `routes/` next to `ztrClient.py` — every `.ztr` config you
    download has to live there.
 4. Symlinks the three wrappers into `~/.local/bin` (or `--prefix`), and
-   optionally adds that to your `PATH` plus shell aliases.
+   optionally adds that to your `PATH` plus shell aliases — for the
+   wrappers, and a `ztrvenv` alias for activating the venv from step 2
+   directly, whichever of those aren't already set up.
 5. Optionally sets up `ztr_tunnel_lp.py` as a persistent `systemd --user`
    service, and a dedicated IP for its tunneled sessions to bind to.
 6. Optionally sets up `ztr_dashboard.py` (a local, read-only tunnel/traffic
@@ -117,10 +119,12 @@ together — bind to, instead of the generic `127.0.0.1`.
 → **Just press Enter** to accept the default (`10.10.15.10`) unless that
 address conflicts with something else on your network.
 
-**4. `<prefix> isn't on your PATH yet — add PATH + shell aliases for ztr_ssh/ztr_forward/ztr_pg to <rc file>? [y/N]:`**
-Only appears if `~/.local/bin` (or your `--prefix`) isn't already on your
-`PATH` — common on a fresh machine. It detects your shell's rc file
-(`.zshrc`, `.bashrc`, or `.bash_profile`) automatically.
+**4. `add to <rc file>: PATH + aliases for ztr_ssh/ztr_forward/ztr_pg, a
+'ztrvenv' alias to activate ztr's venv directly? [y/N]:`**
+Only asks about whichever of those two aren't already set up — e.g. just
+the `ztrvenv` alias, if `~/.local/bin` (or your `--prefix`) is already on
+your `PATH` from an earlier install. It detects your shell's rc file
+(`.zshrc`, `.bashrc`, or `.profile`) automatically.
 → **Answer `y`** unless you'd rather manage your `PATH` and aliases
 yourself — the exact lines it would have added are printed either way if
 you say no, so you can copy them in by hand later.
@@ -215,16 +219,17 @@ for exactly how. Pass one explicitly (`port=22`) only if you have a reason
 to pin a specific lane. Run either way with the venv's interpreter, same as
 everything else here: `~/.local/share/ztr/venv/bin/python3 your_script.py`.
 
-Tip: add this to your shell rc (`~/.bashrc`/`~/.zshrc`) instead of typing
-that full interpreter path every time you want to run something ad hoc
-against this venv:
+Tip: the installer (step 3) offers to add a `ztrvenv` alias to your shell
+rc for you, instead of typing that full interpreter path every time you
+want to run something ad hoc against this venv:
 
 ```bash
 alias ztrvenv='source ~/.local/share/ztr/venv/bin/activate'
 ```
 
-(adjust the path first if you used `--venv-dir`/`VENV_DIR` to put the venv
-somewhere else). Run `ztrvenv` once per shell session, then just
+If you declined that prompt (or want to add it by hand — e.g. you used
+`--venv-dir`/`VENV_DIR` and need to adjust the path), add it yourself as
+above. Run `ztrvenv` once per shell session, then just
 `python3 your_script.py` works directly — `deactivate` to leave it.
 
 ## Troubleshooting
