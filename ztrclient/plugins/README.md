@@ -43,7 +43,7 @@ wrapper's cleanup trap). A session with a live connection is never touched,
 no matter how long it's been open.
 
 ```bash
-~/.local/share/ztr/venv/bin/python3 ztr_tunnel_lp.py --config-file route.ztr
+~/.local/share/ztr/ztr_venv/bin/python3 ztr_tunnel_lp.py --config-file route.ztr
 ```
 
 | Flag | Effect |

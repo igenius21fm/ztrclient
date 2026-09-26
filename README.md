@@ -51,13 +51,13 @@ normal install. Under the hood, it:
 
 1. Makes `plugins/{ztr_ssh,ztr_forward,ztr_pg}` executable — a zip download
    or fresh `git clone` doesn't reliably preserve the executable bit.
-2. Creates a dedicated venv (default `~/.local/share/ztr/venv`) and installs
+2. Creates a dedicated venv (default `~/.local/share/ztr/ztr_venv`) and installs
    `pycryptodome` into it, isolated from your system Python.
 3. Creates `routes/` next to `ztrClient.py` — every `.ztr` config you
    download has to live there.
 4. Symlinks the three wrappers into `~/.local/bin` (or `--prefix`), and
    optionally adds that to your `PATH` plus shell aliases — for the
-   wrappers, and a `ztrvenv` alias for activating the venv from step 2
+   wrappers, and a `ztr_venv` alias for activating the venv from step 2
    directly, whichever of those aren't already set up.
 5. Optionally sets up `ztr_tunnel_lp.py` as a persistent `systemd --user`
    service, and a dedicated IP for its tunneled sessions to bind to.
@@ -74,7 +74,7 @@ installs, where the interactive prompts are skipped automatically anyway
 | Flag | Effect |
 |---|---|
 | `--prefix DIR` | Install the wrappers into `DIR` instead of `~/.local/bin`. |
-| `--venv-dir DIR` | Put the venv at `DIR` instead of `~/.local/share/ztr/venv`. |
+| `--venv-dir DIR` | Put the venv at `DIR` instead of `~/.local/share/ztr/ztr_venv`. |
 | `--with-service` | Set up the tunnel service non-interactively (implies `--with-local-ip`). |
 | `--with-dashboard` | Set up the dashboard service non-interactively. |
 | `--with-local-ip` | Set up the dedicated dummy IP non-interactively. |
@@ -120,9 +120,9 @@ together — bind to, instead of the generic `127.0.0.1`.
 address conflicts with something else on your network.
 
 **4. `add to <rc file>: PATH + aliases for ztr_ssh/ztr_forward/ztr_pg, a
-'ztrvenv' alias to activate ztr's venv directly? [y/N]:`**
+'ztr_venv' alias to activate ztr's venv directly? [y/N]:`**
 Only asks about whichever of those two aren't already set up — e.g. just
-the `ztrvenv` alias, if `~/.local/bin` (or your `--prefix`) is already on
+the `ztr_venv` alias, if `~/.local/bin` (or your `--prefix`) is already on
 your `PATH` from an earlier install. It detects your shell's rc file
 (`.zshrc`, `.bashrc`, or `.profile`) automatically.
 → **Answer `y`** unless you'd rather manage your `PATH` and aliases
@@ -155,7 +155,7 @@ to get a one-time challenge, then:
 ```
 
 The first time you run this, it also creates ztr's dedicated Python venv
-(default `~/.local/share/ztr/venv`) and installs `pycryptodome` into it —
+(default `~/.local/share/ztr/ztr_venv`) and installs `pycryptodome` into it —
 the same venv the installer (step 3 below) reuses afterward instead of
 creating a second one, so this only ever happens once regardless of which
 you run first. It prints your public key, then prompts `Nonce To Sign:` —
@@ -217,19 +217,19 @@ else:
 from the route's available list; see [routes/README.md](ztrclient/routes/README.md)
 for exactly how. Pass one explicitly (`port=22`) only if you have a reason
 to pin a specific lane. Run either way with the venv's interpreter, same as
-everything else here: `~/.local/share/ztr/venv/bin/python3 your_script.py`.
+everything else here: `~/.local/share/ztr/ztr_venv/bin/python3 your_script.py`.
 
-Tip: the installer (step 3) offers to add a `ztrvenv` alias to your shell
+Tip: the installer (step 3) offers to add a `ztr_venv` alias to your shell
 rc for you, instead of typing that full interpreter path every time you
 want to run something ad hoc against this venv:
 
 ```bash
-alias ztrvenv='source ~/.local/share/ztr/venv/bin/activate'
+alias ztr_venv='source ~/.local/share/ztr/ztr_venv/bin/activate'
 ```
 
 If you declined that prompt (or want to add it by hand — e.g. you used
 `--venv-dir`/`VENV_DIR` and need to adjust the path), add it yourself as
-above. Run `ztrvenv` once per shell session, then just
+above. Run `ztr_venv` once per shell session, then just
 `python3 your_script.py` works directly — `deactivate` to leave it.
 
 ## Troubleshooting

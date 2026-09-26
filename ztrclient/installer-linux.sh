@@ -8,7 +8,7 @@
 #
 #   ./installer-linux.sh                       install wrappers into ~/.local/bin
 #   ./installer-linux.sh --prefix DIR          install into DIR instead
-#   ./installer-linux.sh --venv-dir DIR        put ztr's own Python venv at DIR instead of ~/.local/share/ztr/venv
+#   ./installer-linux.sh --venv-dir DIR        put ztr's own Python venv at DIR instead of ~/.local/share/ztr/ztr_venv
 #   ./installer-linux.sh --with-service        also set up ztr_tunnel_lp.py as a systemd --user service
 #   ./installer-linux.sh --with-dashboard      also set up ztr_dashboard.py as a systemd --user service
 #   ./installer-linux.sh --with-requests       also set up ztr_requests (request-composer web UI) as a systemd --user service
@@ -28,7 +28,7 @@
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
 #   2. Checks that python3 exists, then creates a dedicated venv for ztr
-#      (default ~/.local/share/ztr/venv) if one isn't already there, and
+#      (default ~/.local/share/ztr/ztr_venv) if one isn't already there, and
 #      installs pycryptodome into it — ztr_tunnel_lp.py imports RelayClient
 #      from ztrClient.py, which needs it. Keeping this in its own venv
 #      instead of --user/system site-packages means it can't clash with
@@ -71,7 +71,7 @@ PLUGINS_DIR="$SCRIPT_DIR/plugins"
 WRAPPERS=(ztr_ssh ztr_forward ztr_pg)
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
-VENV_DIR="${VENV_DIR:-$HOME/.local/share/ztr/venv}"
+VENV_DIR="${VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}"
 LOCAL_IP="${LOCAL_IP:-10.10.15.10}"
 LOCAL_IP_SET_BY_USER=0
 WITH_SERVICE=0
@@ -292,7 +292,7 @@ uninstall() {
       local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
       grep -vxF "$alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     done
-    local venv_alias_line="alias ztrvenv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
+    local venv_alias_line="alias ztr_venv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
     grep -vxF "$venv_alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     mv "$tmp_rc" "$rc_file"
     log_ok "removed from $rc_file."
@@ -436,7 +436,7 @@ for name in "${WRAPPERS[@]}"; do
 done
 
 # Two independent things can each need adding to the shell rc file: PATH
-# (plus the wrapper aliases, bundled with it as before) and a `ztrvenv`
+# (plus the wrapper aliases, bundled with it as before) and a `ztr_venv`
 # alias for activating ztr's own venv directly — useful regardless of
 # whether PREFIX is already on PATH, so it's checked on its own rather
 # than being skipped along with the PATH block whenever that's already
@@ -444,7 +444,7 @@ done
 # added PATH, but before this alias existed).
 RC_FILE="$(detect_rc_file)"
 PATH_LINE="export PATH=\"$PREFIX:\$PATH\"  # added by ztrclient installer"
-VENV_ALIAS_LINE="alias ztrvenv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
+VENV_ALIAS_LINE="alias ztr_venv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
 
 NEED_PATH=1
 case ":$PATH:" in
@@ -457,11 +457,11 @@ if [[ -f "$RC_FILE" ]] && grep -qxF "$VENV_ALIAS_LINE" "$RC_FILE" 2>/dev/null; t
 fi
 
 if [[ "$NEED_PATH" -eq 0 ]] && [[ "$NEED_VENV_ALIAS" -eq 0 ]]; then
-  log_ok "$PREFIX is already on your PATH, and $RC_FILE already has the ztrvenv alias."
+  log_ok "$PREFIX is already on your PATH, and $RC_FILE already has the ztr_venv alias."
 else
   RC_PROMPT="add to $RC_FILE:"
   [[ "$NEED_PATH" -eq 1 ]] && RC_PROMPT="$RC_PROMPT PATH + aliases for ztr_ssh/ztr_forward/ztr_pg,"
-  [[ "$NEED_VENV_ALIAS" -eq 1 ]] && RC_PROMPT="$RC_PROMPT a 'ztrvenv' alias to activate ztr's venv directly,"
+  [[ "$NEED_VENV_ALIAS" -eq 1 ]] && RC_PROMPT="$RC_PROMPT a 'ztr_venv' alias to activate ztr's venv directly,"
   RC_PROMPT="${RC_PROMPT%,}?"
 
   ADD_TO_RC=0
