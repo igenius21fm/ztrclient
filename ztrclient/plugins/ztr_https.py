@@ -88,7 +88,17 @@ class _TunnelIO:
         self._client = client
 
     def send(self, data: bytes) -> None:
-        self._client.send_HTH(self._sock, data, self._client.session_id, encrypt_payload=False)
+        # for_exit=True: every outgoing chunk here is either a raw HTTP
+        # request or a TLS record (ClientHello included) bound for the
+        # real target, never something a middle hop needs to read to do
+        # its job. Without this, the TLS ClientHello's SNI — the target
+        # hostname — travels in the clear through every middle hop, not
+        # just the exit that's actually supposed to see it: TLS itself
+        # never encrypts SNI, so wrapping the whole record for the exit
+        # hop's eyes only is the only thing that closes that leak. Same
+        # protection for the plain-HTTP path, which otherwise leaks the
+        # Host header and full request to every hop in between.
+        self._client.send_HTH(self._sock, data, self._client.session_id, encrypt_payload=False, for_exit=True)
 
     def recv(self, nbytes: int) -> bytes:
         try:
