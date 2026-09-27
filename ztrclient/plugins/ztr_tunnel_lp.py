@@ -163,7 +163,9 @@ class TunnelProxyServer:
         return await reader.read(self.raw_max_size), None
 
     async def send_HTH(self, writer: asyncio.StreamWriter, data: bytes, session_id: str):
-        header = struct.pack(self.header_format, len(data), session_id.encode("utf-8"))
+        # 'c' (clear/not-for-exit) — this plugin tunnels raw, already-plaintext
+        # local traffic (SSH or otherwise); it never encrypts for the exit hop.
+        header = struct.pack(self.header_format, len(data), session_id.encode("utf-8"), b'c')
         writer.write(header + data)
         await writer.drain()
 
