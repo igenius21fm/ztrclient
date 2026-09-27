@@ -197,6 +197,12 @@ class RelayConfig:
             except OSError as e:
                 raise ConfigError(f"couldn't write cached pubkey for hop {address}: {e}") from e
             l.append(address)
+        authority_pubkey = self.get_authority()
+        try:
+            with open(self.pub_path_by_address("authority"), "w") as f:
+                f.write(authority_pubkey)
+        except OSError as e:
+            raise ConfigError(f"couldn't write cached pubkey for authority: {e}") from e
         return l
     
     def get_ra_keys(self):
@@ -213,6 +219,10 @@ class RelayConfig:
         except KeyError as e:
             raise ConfigFieldError("missing with_encryption.encryptions in this .ztr config") from e
     
+    def get_authority(self):
+        return self.get_ra_keys()["apk"]
+
+
 def recv_exact(sock: socket.socket, length: int) -> bytes:
     """Helper function to reliably read an exact number of bytes from a socket."""
     data = bytearray()
@@ -485,14 +495,33 @@ class RelayClient(RelayConfig):
             instructions.append(base64.b64encode(blob).decode("ascii"))
         return instructions
 
+    @property
+    def random_marker(self):
+        return ''.join(random.choices(string.ascii_letters, k=8))
+
     def struct_payload(self, data: dict) -> str:
-        self.session_id ="ZTR_" + self.sha256(secrets.token_urlsafe(64) + self.config['identifier'])[4:]
+        SN = self.sha256(secrets.token_urlsafe(64) + self.config['identifier'])
+        # marker(8) + "_"(1) + hex tail must total exactly 63 (the wire
+        # header's session field — see send_HTH's HEADER_FORMAT) or
+        # struct.pack silently truncates whatever doesn't fit, corrupting
+        # the session_id on the wire without raising. SN[-54:]: the last
+        # 54 of SN's 64 hex characters, so 8+1+54 = 63 exactly.
+        self.session_id = f"{self.random_marker}_" + SN[-54:]
+
         data["nonce"] = secrets.token_urlsafe(64)
         data["session_id"] = self.session_id
         data["timestamp"] = int(time.time())
         data["route_id"] = self.route_id
         data["client_id"] = self.client_id
-        data["key"] = self.secret_key
+
+        SK_FORMAT = {
+            "key": self.secret_key,
+            "nonce": secrets.token_urlsafe(64),
+            "timestamp": int(time.time()),
+            "route_id": self.route_id
+        }
+        ESK = base64.b64encode(self._encrypt_for("authority", json.dumps(SK_FORMAT))).decode("ascii")
+        data["key"] = ESK
         data["pubkey_id"] = self.settings("encryptions")["pubkey_id"]
         if self.timing_defense:
             data["with_delay"] = True
@@ -512,7 +541,7 @@ class RelayClient(RelayConfig):
             return self.crypt.decrypt_msg_verifyBytesPayload(data, as_="bytes").decode("utf-8")
         except Exception as e:
             raise CryptoError(f"failed to decrypt/verify incoming payload: {e}") from e
-
+    
     def _encrypt_for(self, hop_address: str, plaintext: str) -> bytes:
         """
             Encrypt+sign plaintext specifically for one hop's cached pubkey —
@@ -706,10 +735,18 @@ class RelayClient(RelayConfig):
             self.set_log(f"[set_tunnel] Failed with error({result.get('error_code')}, {result.get('error')})")
         return result
 
-    def send_HTH(self,sock: socket.socket, payload: bytes, session_id:str, encrypt_payload=False):
-        """ Use this send your data"""
-        # session_id len is always 64
+    def send_HTH(self,sock: socket.socket, payload: bytes, session_id:str, encrypt_payload=False, for_exit=False):
+        """ Use this send your data. for_exit=True encrypts payload
+        specifically for the exit hop's own cached pubkey (from
+        get_chain()) and flags the frame so the exit hop knows to decrypt
+        it, with its own private key, before forwarding to the real
+        destination — entry/middle hops relay the still-encrypted bytes
+        untouched and can't read them."""
+        # session_id len is always 63 — see struct_payload()'s comment on
+        # why that total matters (struct.pack truncates silently, it
+        # doesn't raise, if this is ever wrong).
         session_bytes = session_id.encode("utf-8")
+        flag = b'e' if for_exit else b'c'
 
         if self._e2e_crypt is not None and encrypt_payload:
             # Only set if with_encryption() got a recipient_pubkey_path —
@@ -718,8 +755,14 @@ class RelayClient(RelayConfig):
                 payload = self._e2e_crypt.encrypt_sign_BytesPayload(payload)
             except Exception as e:
                 raise CryptoError(f"failed to encrypt outgoing end-to-end payload: {e}") from e
+        elif for_exit:
+            try:
+                self.crypt.set_recipient_pubkey(self.proxy_pub_path(self.exit_hop))
+                payload = self.crypt.encrypt_sign_BytesPayload(payload)
+            except Exception as e:
+                raise CryptoError(f"failed to encrypt outgoing payload for the exit hop: {e}") from e
 
-        header = struct.pack(">I64s", len(payload), session_bytes)
+        header = struct.pack(">I63s1s", len(payload), session_bytes, flag)
         # Send header (68 bytes total) + payload
         try:
             sock.sendall(header + payload)
@@ -728,12 +771,15 @@ class RelayClient(RelayConfig):
 
     def recv_HTH(self, sock: socket.socket, decrypt_payload=False):
         """ Use this to recv your data is you had Native = True"""
-        HEADER_FORMAT = ">I64s"
+        HEADER_FORMAT = ">I63s1s"
         HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
         try:
             header_bytes = recv_exact(sock, HEADER_SIZE)
-            payload_len, session_bytes = struct.unpack(HEADER_FORMAT, header_bytes)
+            # Flag is a hop-directed signal (see send_HTH's for_exit) — a
+            # client never needs to act on one in what it receives back,
+            # so it's read (to keep the header shape correct) and dropped.
+            payload_len, session_bytes, _flag = struct.unpack(HEADER_FORMAT, header_bytes)
         except (OSError, ConnectionError) as e:
             raise NetworkError(f"connection dropped while receiving data over the tunnel: {e}") from e
         except struct.error as e:
