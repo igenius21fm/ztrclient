@@ -29,6 +29,15 @@ against a real route/exit hop, not just inferred from reading the source:
    giving no way to frame each outgoing TLS record via send_HTH the way
    the entry hop requires.
 
+3. What the hops in between can read. A TLS ClientHello names the target
+   (SNI) in cleartext, and a plain-HTTP request is readable text
+   throughout, so both are wrapped for the exit hop's eyes only before
+   they leave (send_HTH's for_exit) — the entry and middle hops relay
+   ciphertext. Once a TLS handshake is finished, everything after it is a
+   TLS record and already opaque to them, so those chunks go out
+   unwrapped. The switch is the handshake state this module itself
+   drives, not a look at the bytes.
+
 Target domains are handed to RelayClient exactly as given — never resolved
 locally. The whole point of routing a request through ZTRelay is that
 *everything* about it, including which domain it's even for, goes through
@@ -87,18 +96,19 @@ class _TunnelIO:
         self._sock = sock
         self._client = client
 
-    def send(self, data: bytes) -> None:
-        # for_exit=True: every outgoing chunk here is either a raw HTTP
-        # request or a TLS record (ClientHello included) bound for the
-        # real target, never something a middle hop needs to read to do
-        # its job. Without this, the TLS ClientHello's SNI — the target
-        # hostname — travels in the clear through every middle hop, not
-        # just the exit that's actually supposed to see it: TLS itself
-        # never encrypts SNI, so wrapping the whole record for the exit
-        # hop's eyes only is the only thing that closes that leak. Same
-        # protection for the plain-HTTP path, which otherwise leaks the
-        # Host header and full request to every hop in between.
-        self._client.send_HTH(self._sock, data, self._client.session_id, encrypt_payload=False, for_exit=True)
+    def send(self, data: bytes, for_exit: bool = True) -> None:
+        # Nothing an entry or middle hop needs to read to do its job ever
+        # goes through here, so anything that would tell them something
+        # about the target is wrapped for the exit hop's eyes only
+        # (for_exit=True, the default — a caller has to opt OUT of the
+        # protection, never into it):
+        #   - a plain-HTTP request: the Host header, cookies, auth headers
+        #     and body are all readable text.
+        #   - a TLS handshake's records: the ClientHello names the target
+        #     in its SNI extension, and TLS never encrypts SNI.
+        # The one thing that opts out is _TLSTunnel's post-handshake
+        # traffic, which is TLS ciphertext already — see _TLSTunnel._flush.
+        self._client.send_HTH(self._sock, data, self._client.session_id, encrypt_payload=False, for_exit=for_exit)
 
     def recv(self, nbytes: int) -> bytes:
         try:
@@ -194,12 +204,23 @@ class _TLSTunnel:
         context = ssl_context or ssl.create_default_context()
         self._obj = context.wrap_bio(self._incoming, self._outgoing, server_hostname=server_hostname)
         self.tls_info = None
+        self._handshaking = True
         self._handshake()
 
     def _flush(self) -> None:
         pending = self._outgoing.read()
         if pending:
-            self._io.send(pending)
+            # Only the handshake needs the exit-hop wrapper: it's where the
+            # ClientHello's SNI (the target's hostname) goes out in the
+            # clear, and it's every handshake flush, not just the first —
+            # a TLS 1.3 HelloRetryRequest makes the client send a second
+            # ClientHello with the SNI again. After it, everything this
+            # object writes is a TLS application-data record, already
+            # ciphertext to any hop, so wrapping it again would only cost
+            # a signature here and a decrypt + verify at the exit per chunk.
+            # This is known from where we are in our own handshake, not
+            # inferred by inspecting the bytes.
+            self._io.send(pending, for_exit=self._handshaking)
 
     def _fill(self) -> None:
         chunk = self._io.recv(65536)
@@ -217,7 +238,8 @@ class _TLSTunnel:
                 self._fill()
             except ssl.SSLWantWriteError:
                 self._flush()
-        self._flush()
+        self._flush()  # the client's own last handshake flight (Finished) — still handshake
+        self._handshaking = False
         self.tls_info = _extract_tls_info(self._obj)
 
     def send(self, data: bytes) -> None:
