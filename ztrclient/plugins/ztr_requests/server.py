@@ -163,6 +163,43 @@ def list_route_files():
     return sorted(f for f in os.listdir(ROUTES_DIR) if f.endswith(".ztr"))
 
 
+def route_entry_ports(config_file):
+    """The entry-hop lanes a route offers (hop_settings.services_ports.tcp,
+    sorted) — what the Entry port dropdown lists, and what an explicit
+    choice is checked against. None if there's no such route file; [] if
+    the file has no usable lane list. Only ever opens a file that
+    list_route_files() itself returned, so a crafted name can't reach
+    outside ROUTES_DIR."""
+    name = config_file or ""
+    if name not in list_route_files():
+        return None
+    try:
+        with open(os.path.join(ROUTES_DIR, name)) as f:
+            ports = json.load(f)["hop_settings"]["services_ports"]["tcp"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    return sorted(p for p in ports if isinstance(p, int)) if isinstance(ports, list) else []
+
+
+def parse_entry_port(raw, config_file):
+    """(entry_port, error). None / "" / "auto" mean auto: the client picks
+    the least-used lane per new connection (entry_port None). Anything else
+    has to be one of the route's own lanes — the entry hop only listens on
+    those, so any other number would just hang or be refused."""
+    if raw is None or (isinstance(raw, str) and raw.strip().lower() in ("", "auto")):
+        return None, None
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return None, "entry_port must be a number or 'auto'"
+    lanes = route_entry_ports(config_file)
+    if lanes is None:
+        return None, f"unknown route config {config_file!r}"
+    if port not in lanes:
+        return None, f"entry_port {port} isn't one of this route's lanes {lanes}"
+    return port, None
+
+
 def _json_safe(value):
     """EXIF values come back as a mix of int/str/bytes/tuple and Pillow's
     own IFDRational — none of which but the first two survive json.dumps
@@ -409,6 +446,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_static(path[len("/static/"):])
         elif path == "/api/routes":
             self._send_json(200, {"routes": list_route_files()})
+        elif path == "/api/route_ports":
+            ports = route_entry_ports(qs.get("config_file", [""])[0])
+            if ports is None:
+                self._send_json(404, {"ok": False, "error": "unknown route config"})
+            else:
+                self._send_json(200, {"ports": ports})
         elif path == "/api/history":
             limit = int(qs.get("limit", [50])[0])
             self._send_json(200, {"history": history.list(limit)})
@@ -498,6 +541,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with_timing_defense=bool(body.get("with_timing_defense")),
                 verify=body.get("verify", True) if isinstance(body.get("verify", True), bool) else True,
                 cert=(body.get("client_cert") or "").strip() or None,
+                # Not lane-checked: it only has to match the key a Session
+                # was stored under, and an unknown value simply matches none.
+                entry_port=body["entry_port"] if isinstance(body.get("entry_port"), int) else None,
             )
             self._send_json(200, {"ok": True})
         else:
@@ -577,6 +623,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "config_file and url are required"})
             return
 
+        entry_port, entry_port_error = parse_entry_port(body.get("entry_port"), config_file)
+        if entry_port_error:
+            self._send_json(400, {"ok": False, "error": entry_port_error})
+            return
+
         batch_run_id = (body.get("batch_run_id") or "").strip()
         raw_line_index = body.get("batch_line_index")
         batch_line_value = body.get("batch_line_value")
@@ -595,6 +646,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with_timing_defense=with_timing_defense,
             verify=verify,
             cert=client_cert,
+            entry_port=entry_port,
         )
         session = sessions.get_or_create(**session_kwargs)
 
@@ -680,6 +732,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(400, "text/plain", b"url and config_file are required")
             return
 
+        entry_port, entry_port_error = parse_entry_port(qs.get("entry_port", [""])[0], config_file)
+        if entry_port_error:
+            self._send(400, "text/plain", entry_port_error.encode("utf-8"))
+            return
+
         try:
             port = int(raw_port) if raw_port else None
         except ValueError:
@@ -715,6 +772,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with_timing_defense=with_timing_defense,
             verify=verify,
             cert=client_cert,
+            entry_port=entry_port,
         )
         session = sessions.get_or_create(**session_kwargs)
 

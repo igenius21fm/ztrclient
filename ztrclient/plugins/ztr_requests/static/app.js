@@ -381,7 +381,28 @@ $(function () {
       return;
     }
     res.routes.forEach((r) => $sel.append(`<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`));
+    loadEntryPorts();
   });
+
+  // Entry port: Auto (the default, an empty value) or one of the selected
+  // route's own lanes. Repopulated whenever the route changes; the current
+  // choice is kept only if the new route actually offers that lane.
+  let entryPortSeq = 0;
+  function loadEntryPorts(preferred) {
+    const seq = ++entryPortSeq;
+    const configFile = $('#routeSelect').val();
+    const $sel = $('#entryPort');
+    const keep = preferred !== undefined ? preferred : $sel.val();
+    $sel.html('<option value="">Auto</option>');
+    if (!configFile) return;
+    $.get('/api/route_ports', { config_file: configFile }).done((res) => {
+      if (seq !== entryPortSeq) return; // a newer route change already won
+      (res.ports || []).forEach((p) => $sel.append(`<option value="${p}">${p}</option>`));
+      const want = keep === null || keep === undefined ? '' : String(keep);
+      $sel.val($sel.find('option').toArray().some((o) => o.value === want) ? want : '');
+    });
+  }
+  $('#routeSelect').on('change', () => loadEntryPorts());
 
   loadEnvironments();
   loadVars();
@@ -523,6 +544,7 @@ $(function () {
     $('#urlInput').val(item.url);
     syncParamsFromUrl();
     if (item.config_file) $('#routeSelect').val(item.config_file);
+    loadEntryPorts(item.entry_port); // null/undefined -> Auto
     $('#targetPort').val(item.target_port || '');
     $('#withTimingDefense').prop('checked', !!item.with_timing_defense);
     $('#timeoutInput').val(item.timeout || '');
@@ -613,6 +635,7 @@ $(function () {
         const flagParts = [p.with_timing_defense ? 'timing-defense' : 'plain'];
         if (p.verify === false) flagParts.push('TLS unverified');
         if (p.client_cert) flagParts.push('client cert');
+        flagParts.push(p.entry_port ? `entry port ${p.entry_port}` : 'auto port');
         const flags = flagParts.join(' · ');
         const origins = p.origins && p.origins.length ? p.origins.join(', ') : 'no open connections yet';
         const $row = $(`
@@ -650,6 +673,7 @@ $(function () {
       headers: collectKVRows($('#headerRows')),
       body: $('#bodyInput').val() || undefined,
       config_file: $('#routeSelect').val(),
+      entry_port: parseInt($('#entryPort').val(), 10) || undefined,
       target_port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),
       timeout: parseFloat($('#timeoutInput').val()) || undefined,
@@ -816,9 +840,13 @@ $(function () {
     });
     svg += '</svg>';
 
+    const lane = routeInfo.entry_port
+      ? `<div class="pool-flags">Entry port ${escapeHtml(String(routeInfo.entry_port))}${$('#entryPort').val() ? '' : ' · auto-selected'}</div>`
+      : '';
     $card.empty()
       .append('<div class="side-eyebrow">Relay Path</div>')
       .append(`<div class="route-diagram-scroll">${svg}</div>`)
+      .append(lane)
       .show();
   }
 
@@ -1051,10 +1079,12 @@ $(function () {
     const timeout = parseFloat($('#timeoutInput').val()) || undefined;
     const verify = $('#verifyTls').is(':checked');
     const clientCert = $('#clientCertPath').val().trim();
+    const entryPort = $('#entryPort').val();
 
     const params = new URLSearchParams();
     params.set('url', url);
     params.set('config_file', configFile);
+    if (entryPort) params.set('entry_port', entryPort);
     if (port) params.set('port', String(port));
     if (withTimingDefense) params.set('with_timing_defense', '1');
     if (timeout) params.set('timeout', String(timeout));
@@ -1500,6 +1530,7 @@ $(function () {
     const headers = buildHeaders(rawHeaders, authHeader);
     const payload = {
       config_file: configFile,
+      entry_port: parseInt($('#entryPort').val(), 10) || undefined,
       port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),
       timeout: parseFloat($('#timeoutInput').val()) || undefined,

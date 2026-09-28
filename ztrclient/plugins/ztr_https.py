@@ -186,6 +186,7 @@ def _extract_route_info(client: RelayClient) -> dict:
     ]
     return {
         "entry_hop": client.entry_hop,
+        "entry_port": client.PORT,
         "exit_hop": client.exit_hop,
         "hops": hops,
     }
@@ -614,7 +615,10 @@ class Session:
     that end-to-end-encrypts the payload for a ZTR-aware endpoint to
     decrypt on the other end (e.g. ztr_requests.py) — turning it on for
     an arbitrary HTTPS target would hand it an encrypted blob instead of
-    a TLS handshake, breaking the request outright.
+    a TLS handshake, breaking the request outright. `entry_port` pins
+    every tunnel this Session opens to one lane of the entry hop (it has
+    to be one of the route's hop_settings.services_ports); None, the
+    default, picks the least-used lane per new connection.
     """
 
     def __init__(
@@ -625,6 +629,7 @@ class Session:
         verify=True,
         cert=None,
         with_timing_defense: bool = False,
+        entry_port: int = None,
     ):
         self._config_file = config_file
         self._ttl = ttl
@@ -632,6 +637,7 @@ class Session:
         self._verify = verify
         self._cert = cert
         self._with_timing_defense = with_timing_defense
+        self._entry_port = entry_port
         self._connections = {}  # (scheme, host, port) -> (io_or_tls, RelayClient)
         self._cookies = {}  # hostname -> {name: value} — exact-host match only, no
                              # Domain=/Path= attribute matching (Set-Cookie carries
@@ -658,7 +664,18 @@ class Session:
         # — see this module's own docstring for why. The exit hop resolves
         # it itself, over the registry, so no DNS lookup for this target
         # ever happens outside the tunnel.
-        client = RelayClient(target_host=domain, config_file=self._config_file)
+        # entry_port None = let RelayClient pick the least-used lane
+        # itself; a number pins every tunnel this Session opens to that
+        # lane of the entry hop (and so to that lane's one cached
+        # authorization, instead of one per lane).
+        client = RelayClient(target_host=domain, port=self._entry_port, config_file=self._config_file)
+        if self._entry_port is not None:
+            lanes = client.settings("services_ports")[client.transport_type]
+            if self._entry_port not in lanes:
+                raise TunnelError(
+                    f"entry port {self._entry_port} isn't one of this route's lanes {lanes} — "
+                    f"the entry hop isn't listening on it"
+                )
         client.set_target_port(port)
         if self._with_timing_defense:
             client.with_timing_defense()

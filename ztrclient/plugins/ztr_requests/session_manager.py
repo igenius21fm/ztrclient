@@ -28,12 +28,17 @@ class SessionManager:
     # it does for timeout), so a different verify/cert combination against
     # the same route genuinely needs its own Session, not a shared one
     # that would silently apply the wrong trust settings to it.
+    #
+    # entry_port (None = auto) is part of the key for the same reason: a
+    # Session pins every tunnel it opens to one entry lane, so a different
+    # choice needs its own Session, and auto must never quietly reuse a
+    # connection that was opened on a lane someone chose by hand.
     @staticmethod
-    def _key(config_file, with_timing_defense, verify=True, cert=None):
-        return (config_file, bool(with_timing_defense), verify, cert)
+    def _key(config_file, with_timing_defense, verify=True, cert=None, entry_port=None):
+        return (config_file, bool(with_timing_defense), verify, cert, entry_port)
 
-    def get_or_create(self, config_file, with_timing_defense=False, verify=True, cert=None):
-        key = self._key(config_file, with_timing_defense, verify, cert)
+    def get_or_create(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None):
+        key = self._key(config_file, with_timing_defense, verify, cert, entry_port)
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
@@ -42,15 +47,16 @@ class SessionManager:
                     with_timing_defense=with_timing_defense,
                     verify=verify,
                     cert=cert,
+                    entry_port=entry_port,
                 )
                 self._sessions[key] = session
             return session
 
-    def drop(self, config_file, with_timing_defense=False, verify=True, cert=None):
+    def drop(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None):
         """Evicts a cached Session (e.g. after a request against it fails)
         so the next request opens fresh tunnels instead of reusing
         connections that may now be wedged."""
-        key = self._key(config_file, with_timing_defense, verify, cert)
+        key = self._key(config_file, with_timing_defense, verify, cert, entry_port)
         with self._lock:
             session = self._sessions.pop(key, None)
         if session is not None:
@@ -61,7 +67,7 @@ class SessionManager:
         with self._lock:
             items = list(self._sessions.items())
         out = []
-        for (config_file, with_timing_defense, verify, cert), session in items:
+        for (config_file, with_timing_defense, verify, cert, entry_port), session in items:
             origins = [f"{scheme}://{host}:{port}" for (scheme, host, port) in session._connections]
             out.append({
                 "config_file": config_file,
@@ -73,6 +79,9 @@ class SessionManager:
                 # re-POSTs this exact row back to /api/sessions/drop — hits
                 # the same key /api/sessions/drop already reads.
                 "client_cert": cert,
+                # None = auto. Same reasoning as client_cert above: the
+                # disconnect button re-POSTs this exact row back.
+                "entry_port": entry_port,
                 "origins": origins,
             })
         return out

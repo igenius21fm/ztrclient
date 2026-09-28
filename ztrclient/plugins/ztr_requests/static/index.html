@@ -70,7 +70,10 @@
       <label class="field-label" for="routeSelect">Route config</label>
       <select class="field-input" id="routeSelect"></select>
 
-      <label class="field-label" for="targetPort">Port <span class="hint">defaults to 443 (https) / 80 (http)</span></label>
+      <label class="field-label" for="entryPort">Entry port <span class="hint">auto uses the least-used lane</span></label>
+      <select class="field-input" id="entryPort"><option value="">Auto</option></select>
+
+      <label class="field-label" for="targetPort">Target port <span class="hint">defaults to 443 (https) / 80 (http)</span></label>
       <input class="field-input" id="targetPort" type="number" min="1" max="65535" placeholder="443">
 
       <details class="advanced">
