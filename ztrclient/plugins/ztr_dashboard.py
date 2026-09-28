@@ -373,6 +373,9 @@ def main():
         start_sniffer(_route["chain"][0]["address"], _route["services_ports"], args.iface)
 
     host = resolve_host(args.host)
+    # Without this, restarting right after a stop fails with "Address already
+    # in use" until the closed connections' TIME_WAIT clears (up to ~60s).
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer((host, args.port), Handler) as httpd:
         print(f"Dashboard running at http://{host}:{args.port}/")
         httpd.serve_forever()
