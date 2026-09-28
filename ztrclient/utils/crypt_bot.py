@@ -4,6 +4,11 @@ import os
 import secrets
 from typing import Tuple, Union
 
+try:
+    import fcntl
+except ImportError:  # no flock on this platform — create_keys() then runs unlocked, as before
+    fcntl = None
+
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
@@ -143,18 +148,39 @@ class CryptBot:
         if self.check_keys() and reuse:
             return self.load_keys()
 
-        key = RSA.generate(rsa_size)
-        priv_pem = key.export_key("PEM")
-        pub_pem = key.publickey().export_key("PEM")
+        # One generator at a time: processes starting together on a fresh
+        # install each generated their own pair, and only one of those could
+        # be the pair left on disk. The rest wait here, then load that one.
+        lock_fd = os.open(os.path.dirname(os.path.abspath(self.pathPrivateKey)), os.O_RDONLY)
+        try:
+            if fcntl:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if reuse and self.check_keys():
+                return self.load_keys()
 
-        with open(self.pathPrivateKey, "wb") as f:
-            f.write(priv_pem)
-        with open(self.pathPublicKey, "wb") as f:
-            f.write(pub_pem)
+            key = RSA.generate(rsa_size)
+            self._write_atomically(self.pathPrivateKey, key.export_key("PEM"))
+            self._write_atomically(self.pathPublicKey, key.publickey().export_key("PEM"))
 
-        self._priv_key = key
-        self._pub_key = key.publickey()
-        return self._pub_key, self._priv_key
+            self._priv_key = key
+            self._pub_key = key.publickey()
+            return self._pub_key, self._priv_key
+        finally:
+            os.close(lock_fd)  # also releases the lock
+
+    @staticmethod
+    def _write_atomically(path: str, data: bytes):
+        tmp_path = f"{path}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def load_keys(self) -> Tuple[RSA.RsaKey, RSA.RsaKey]:
         priv = self._load_priv_key()

@@ -45,6 +45,29 @@ def write_file_atomically(path: str, content: str) -> None:
         raise
 
 
+def create_file_once(path: str, content: str) -> None:
+    """Creates `path` with `content` only if it doesn't exist yet. The file
+    appears complete or not at all, and when several processes race the
+    first one wins and the rest leave it alone, so everyone reads the same
+    content."""
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(content)
+        try:
+            os.link(tmp_path, path)  # atomic, and fails if path already exists
+        except FileExistsError:
+            pass
+        except OSError:  # a filesystem without hard links
+            if not os.path.exists(path):
+                os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 class ZTRClientError(Exception):
     """Base class for every exception ztrClient.py raises on purpose."""
 
@@ -481,10 +504,9 @@ class RelayClient(RelayConfig):
     def get_hi_salt(self):
         pathSalt = f"{self.SCRIPT_DIR}/.hi_salt"
         if not os.path.exists(pathSalt):
-            with open(pathSalt, "w") as f:
-                f.write(secrets.token_urlsafe(64))
-        salt = open(pathSalt, "r").read()
-        return salt
+            create_file_once(pathSalt, secrets.token_urlsafe(64))
+        with open(pathSalt, "r") as f:
+            return f.read()
     
     def get_hop_id(self, hop: str):
         salt = self.get_hi_salt()
