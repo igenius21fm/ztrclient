@@ -13,9 +13,36 @@ import base64
 from pathlib import Path
 import sqlite3
 import logging
+import threading
 
 def sha256(msg: str):
     return hashlib.sha256(msg.encode()).hexdigest()
+
+
+def write_file_atomically(path: str, content: str) -> None:
+    """Writes `content` to `path` via a temp file + os.replace, so a
+    concurrent reader sees the old file or the new one, never an empty or
+    half-written one; skips the write if the file already has this content.
+    get_chain() rewrites every hop's key file on each RelayClient, while
+    another request may be reading one of them."""
+    try:
+        with open(path, "r") as f:
+            if f.read() == content:
+                return
+    except OSError:
+        pass  # missing or unreadable — write it below
+
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # unique per writer
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 class ZTRClientError(Exception):
@@ -192,15 +219,13 @@ class RelayConfig:
             except (KeyError, TypeError) as e:
                 raise ConfigFieldError(f"a hop in 'chain' is missing 'pubkey' or 'address': {hop}") from e
             try:
-                with open(self.pub_path_by_address(address), "w") as f:
-                    f.write(pubkey)
+                write_file_atomically(self.pub_path_by_address(address), pubkey)
             except OSError as e:
                 raise ConfigError(f"couldn't write cached pubkey for hop {address}: {e}") from e
             l.append(address)
         authority_pubkey = self.get_authority()
         try:
-            with open(self.pub_path_by_address("authority"), "w") as f:
-                f.write(authority_pubkey)
+            write_file_atomically(self.pub_path_by_address("authority"), authority_pubkey)
         except OSError as e:
             raise ConfigError(f"couldn't write cached pubkey for authority: {e}") from e
         return l
