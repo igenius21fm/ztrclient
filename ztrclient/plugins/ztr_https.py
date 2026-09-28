@@ -476,7 +476,15 @@ class _HTTPReader:
                 except ValueError:
                     raise HTTPProtocolError(f"malformed chunk size: {size_line!r}")
                 if size == 0:
-                    self._read_until(b"\r\n\r\n")  # trailing headers (rare) + final CRLF
+                    # After the last chunk comes a trailer section: zero or
+                    # more header lines, ended by an empty line. Read it line
+                    # by line until that empty line. Waiting for "\r\n\r\n"
+                    # instead only works when there's at least one trailer —
+                    # in the normal no-trailer case just a single "\r\n" is
+                    # left, so on a keep-alive connection (nothing closes the
+                    # socket) that read would block until the timeout.
+                    while self._read_until(b"\r\n"):
+                        pass
                     break
                 chunk = self._read_exact(size)
                 self._read_exact(2)  # the \r\n after each chunk's data
