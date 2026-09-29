@@ -549,7 +549,14 @@ html, body {
 }
 .body-search-bar:focus-within { border-color: var(--accent); }
 .body-search-icon { flex: none; width: 13px; height: 13px; color: var(--muted); }
-.body-search-mode {
+/* select.field-input (its base rule, in the .field-input block above) sets
+   width: 100% at a higher specificity (element+class) than a plain class
+   selector can override — matching that shape here, not just width: auto
+   on its own, is what actually wins the cascade. Without this the select
+   claimed ~100% of .body-search-bar's width, squeezing the input to a few
+   px and pushing the case toggle out past the bar's own right edge, onto
+   the Copy button next to it. */
+select.body-search-mode {
   flex: none;
   width: auto;
   padding: 3px 20px 3px 6px;
