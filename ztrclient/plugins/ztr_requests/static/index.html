@@ -25,6 +25,7 @@
   <symbol id="icon-user" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
   <symbol id="icon-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z"/></symbol>
   <symbol id="icon-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+  <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
 </svg>
 
 <datalist id="headerNameOptions">
@@ -268,10 +269,35 @@
 
       <div class="tab-panel active" id="rtab-body">
         <div class="response-body-toolbar" id="responseBodyToolbar">
+          <div class="body-search-bar" id="bodySearchBar">
+            <svg class="icon body-search-icon"><use href="#icon-search"></use></svg>
+            <select class="field-input body-search-mode" id="bodySearchMode" title="Search mode">
+              <option value="text">Text</option>
+              <option value="regex">Regex</option>
+              <option value="css">CSS selector</option>
+              <option value="jsonpath">JSONPath</option>
+            </select>
+            <input class="field-input body-search-input" id="bodySearchInput" type="text"
+                   placeholder="Search the response body…" autocomplete="off" spellcheck="false">
+            <label class="body-search-case" id="bodySearchCaseLabel" title="Case sensitive">
+              <input type="checkbox" id="bodySearchCase"> Aa
+            </label>
+            <span class="body-search-count" id="bodySearchCount"></span>
+            <button type="button" class="icon-btn" id="bodySearchPrev" title="Previous match" aria-label="Previous match" style="display:none">
+              <svg class="icon body-search-prev-icon"><use href="#icon-chevron"></use></svg>
+            </button>
+            <button type="button" class="icon-btn" id="bodySearchNext" title="Next match" aria-label="Next match" style="display:none">
+              <svg class="icon"><use href="#icon-chevron"></use></svg>
+            </button>
+            <button type="button" class="icon-btn" id="bodySearchClear" title="Clear search" aria-label="Clear search" style="display:none">
+              <svg class="icon"><use href="#icon-x"></use></svg>
+            </button>
+          </div>
           <button class="ghost-btn small" id="copyBodyBtn">
             <svg class="icon"><use href="#icon-copy"></use></svg> Copy
           </button>
         </div>
+        <div class="body-search-results" id="bodySearchResults" style="display:none"></div>
         <pre class="response-body" id="responseBody">Send a request to see the response here.</pre>
         <div class="response-image-wrap" id="responseImageWrap" style="display:none">
           <img class="response-image" id="responseImage" alt="Response image">

@@ -26,6 +26,11 @@ from urllib.parse import parse_qs, urlsplit
 from PIL import ExifTags, Image
 from PIL.TiffImagePlugin import IFDRational
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None  # /api/body_query's css mode reports this itself; nothing else here needs it
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
 PLUGINS_DIR = os.path.dirname(SCRIPT_DIR)
@@ -504,6 +509,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/send":
             self._handle_send(body)
+        elif path == "/api/body_query":
+            self._handle_body_query(body)
         elif path == "/api/env":
             key = (body.get("key") or "").strip()
             if not key:
@@ -591,6 +598,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True})
         else:
             self._send(404, "text/plain", b"not found")
+
+    # The response body the composer is showing right now, sent back up
+    # whole rather than looked up by history/batch id — the composer may be
+    # showing a response that was never saved at all (a plain one-off Send).
+    # Capped so a pathological single match, or a selector matching most of
+    # a huge page, can't blow up the reply.
+    BODY_QUERY_MAX_MATCHES = 500
+    BODY_QUERY_MAX_MATCH_LEN = 20_000
+
+    def _handle_body_query(self, body):
+        mode = (body.get("mode") or "").strip()
+        raw_body = body.get("body")
+        selector = (body.get("selector") or "").strip()
+
+        if raw_body is None:
+            self._send_json(400, {"ok": False, "error": "body is required"})
+            return
+        if not selector:
+            self._send_json(400, {"ok": False, "error": "selector is required"})
+            return
+
+        if mode != "css":
+            self._send_json(400, {"ok": False, "error": f"unsupported mode {mode!r}"})
+            return
+
+        if BeautifulSoup is None:
+            self._send_json(
+                503,
+                {"ok": False, "error": "beautifulsoup4 isn't installed in this venv — "
+                                        "re-run installer-linux.sh --with-requests to add it"},
+            )
+            return
+
+        try:
+            elements = BeautifulSoup(raw_body, "html.parser").select(selector)
+        except Exception as e:  # noqa: BLE001 — soupsieve's own selector-syntax errors aren't one fixed type
+            self._send_json(400, {"ok": False, "error": f"invalid CSS selector: {e}"})
+            return
+
+        def clip(text):
+            if len(text) <= self.BODY_QUERY_MAX_MATCH_LEN:
+                return text, False
+            return text[: self.BODY_QUERY_MAX_MATCH_LEN], True
+
+        matches = []
+        for el in elements[: self.BODY_QUERY_MAX_MATCHES]:
+            html, html_clipped = clip(str(el))
+            text, text_clipped = clip(el.get_text())
+            matches.append({
+                "tag": el.name,
+                "html": html,
+                "html_truncated": html_clipped,
+                "text": text,
+                "text_truncated": text_clipped,
+            })
+
+        self._send_json(200, {
+            "ok": True,
+            "count": len(elements),
+            "matches": matches,
+            "matches_truncated": len(elements) > self.BODY_QUERY_MAX_MATCHES,
+        })
 
     def _handle_send(self, body):
         config_file = (body.get("config_file") or "").strip()

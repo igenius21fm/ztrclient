@@ -534,7 +534,143 @@ html, body {
 
 .response-stat { font-size: 0.76rem; color: var(--muted); font-family: 'SF Mono', Menlo, Consolas, monospace; }
 
-.response-body-toolbar { display: flex; justify-content: flex-end; margin: 8px 0 6px; }
+.response-body-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 8px 0 6px; }
+
+.body-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 3px 8px;
+}
+.body-search-bar:focus-within { border-color: var(--accent); }
+.body-search-icon { flex: none; width: 13px; height: 13px; color: var(--muted); }
+.body-search-mode {
+  flex: none;
+  width: auto;
+  padding: 3px 20px 3px 6px;
+  font-size: 0.72rem;
+  height: auto;
+  border: none;
+  background-color: transparent;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+}
+.body-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  font-size: 0.8rem;
+  height: auto;
+}
+.body-search-input:focus { border: none; }
+/* An invalid regex or a CSS/JSONPath expression the parser rejected —
+   the bar itself turns red rather than a separate error line, so it reads
+   at a glance without pushing the body down every time you're mid-typing
+   an expression. */
+.body-search-bar.body-search-invalid { border-color: var(--err); }
+.body-search-bar.body-search-invalid .body-search-input { color: var(--err); }
+
+.body-search-case {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.body-search-case:has(input:checked) { color: var(--accent); background: rgba(124, 108, 246, 0.14); }
+.body-search-case input { margin: 0; }
+
+.body-search-count {
+  flex: none;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.body-search-count.body-search-count-zero { color: var(--err); }
+
+.body-search-prev-icon { transform: rotate(180deg); }
+
+/* CSS-selector and JSONPath modes: a match is a whole element/value, not a
+   text span, so it renders as its own card here instead of an inline
+   highlight — the raw body view underneath stays hidden while this is
+   showing (toggled in JS by hiding #responseBody). */
+.body-search-results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.body-search-result-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.body-search-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+}
+.body-search-result-index { color: var(--text); font-weight: 700; }
+.body-search-result-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.body-search-result-tabs { flex: none; display: flex; gap: 2px; }
+.body-search-result-tab {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.68rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.body-search-result-tab.active { color: var(--accent); background: rgba(124, 108, 246, 0.14); }
+.body-search-result-body {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  max-height: 220px;
+  overflow: auto;
+}
+.body-search-empty, .body-search-error {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.body-search-error { color: var(--err); }
+.body-search-truncated-note {
+  flex: none;
+  padding: 6px 2px 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-align: center;
+}
 
 .response-body {
   flex: 1;
@@ -551,6 +687,12 @@ html, body {
   word-break: break-word;
   color: var(--text);
 }
+
+/* Text/Regex search mode: the body is re-rendered as escaped HTML with
+   matches wrapped in these instead of the usual .text(), so nothing else
+   about the view changes — same font, same wrapping, just marked spans. */
+.body-search-hit { background: rgba(255, 184, 79, 0.35); color: var(--text); border-radius: 2px; }
+.body-search-hit.body-search-hit-active { background: var(--warn); color: #1a1408; }
 
 .response-image-wrap {
   flex: 1;

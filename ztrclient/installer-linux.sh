@@ -410,6 +410,18 @@ if [[ "$WITH_REQUESTS" -eq 1 ]]; then
   else
     log_warn "couldn't install Pillow — ztr_requests will still start, but image responses will fail to render."
   fi
+
+  # Only needed by ztr_requests/server.py's CSS-selector body search (Body
+  # tab -> the search bar's "CSS selector" mode) -- everything else in
+  # ztr_requests works without it; that one mode just reports an error if
+  # it's missing.
+  if "$VENV_PY" -c "import bs4" >/dev/null 2>&1; then
+    log_ok "beautifulsoup4 already installed in the venv."
+  elif "$VENV_PY" -m pip install --quiet beautifulsoup4; then
+    log_ok "beautifulsoup4 installed."
+  else
+    log_warn "couldn't install beautifulsoup4 — ztr_requests will still start, but CSS-selector body search will fail."
+  fi
 fi
 
 # ---------------------------------------------------------------------------

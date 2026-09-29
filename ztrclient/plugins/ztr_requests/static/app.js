@@ -50,6 +50,470 @@ $(function () {
     }
   }
 
+  // ---------------- Body search & filter ----------------
+  //
+  // Four modes over the current response body:
+  //   Text / Regex   client-side, highlights matches inline in
+  //                  #responseBody (escaped HTML with <mark> spans) with
+  //                  next/prev navigation — searches the same text
+  //                  that's actually on screen (prettyBody's output), so
+  //                  match positions line up with what's visible.
+  //   CSS selector   HTML bodies only. Sent to /api/body_query
+  //                  (BeautifulSoup, server-side, real CSS3 support via
+  //                  soupsieve) since a selector match is a whole
+  //                  element, not a text span — renders as a list of
+  //                  result cards instead of an inline highlight.
+  //   JSONPath       JSON bodies only. Evaluated entirely client-side —
+  //                  see evalJsonPath()'s own comment for the exact
+  //                  (deliberately not complete) subset it supports.
+  //                  Also a list of result cards, one per matched value.
+
+  let currentBodyText = '';
+  let currentBodyContentType = '';
+  let bodySearchHits = [];         // text/regex mode: the <mark> DOM elements, in document order
+  let bodySearchActiveIndex = -1;
+  let bodySearchDebounceTimer = null;
+  let bodySearchQuerySeq = 0;      // guards a slow /api/body_query reply from an older keystroke landing after a newer one already did
+
+  function looksLikeHtml(contentType) {
+    return /html|xml/i.test(contentType || '');
+  }
+
+  function tryParseJson(text) {
+    try {
+      return { ok: true, value: JSON.parse(text) };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  function updateBodySearchModeAvailability() {
+    const isHtml = looksLikeHtml(currentBodyContentType);
+    const isJson = !!currentBodyText && tryParseJson(currentBodyText).ok;
+    $('#bodySearchMode option[value="css"]').prop('disabled', !isHtml);
+    $('#bodySearchMode option[value="jsonpath"]').prop('disabled', !isJson);
+    if ($('#bodySearchMode option:selected').prop('disabled')) {
+      $('#bodySearchMode').val('text');
+    }
+  }
+
+  function resetBodySearchUi() {
+    bodySearchHits = [];
+    bodySearchActiveIndex = -1;
+    bodySearchQuerySeq++;   // orphans any in-flight /api/body_query reply
+    $('#bodySearchInput').val('');
+    $('#bodySearchBar').removeClass('body-search-invalid');
+    $('#bodySearchCount').text('').removeClass('body-search-count-zero');
+    $('#bodySearchPrev, #bodySearchNext, #bodySearchClear').hide();
+    $('#bodySearchResults').hide().empty();
+    $('#responseBody').show();
+  }
+
+  function clearBodySearch() {
+    resetBodySearchUi();
+    $('#responseBody').text(prettyBody(currentBodyText));
+  }
+
+  function buildSearchRegex(mode, query, caseSensitive) {
+    const flags = 'g' + (caseSensitive ? '' : 'i');
+    if (mode === 'text') {
+      return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    }
+    return new RegExp(query, flags);   // may throw — caller catches
+  }
+
+  // Splits rawText on regex matches and re-escapes each piece separately,
+  // rather than escaping first and searching second — the match offsets
+  // regex.exec() returns are positions in the RAW string, and escaping
+  // changes string length (< becomes &lt;), so reusing raw offsets against
+  // the escaped string would corrupt output. Also guards zero-width
+  // matches (e.g. a pattern like "x*") from looping forever.
+  function highlightMatches(rawText, regex) {
+    let lastIndex = 0;
+    let html = '';
+    let count = 0;
+    let m;
+    while ((m = regex.exec(rawText)) !== null) {
+      if (m[0] === '') {
+        regex.lastIndex++;
+        continue;
+      }
+      html += escapeHtml(rawText.slice(lastIndex, m.index));
+      html += `<mark class="body-search-hit">${escapeHtml(m[0])}</mark>`;
+      count++;
+      lastIndex = m.index + m[0].length;
+    }
+    html += escapeHtml(rawText.slice(lastIndex));
+    return { html, count };
+  }
+
+  function showBodySearchInvalid(message) {
+    $('#bodySearchBar').addClass('body-search-invalid');
+    $('#bodySearchCount').text(message).addClass('body-search-count-zero');
+    $('#bodySearchPrev, #bodySearchNext').hide();
+    $('#bodySearchClear').show();
+    $('#bodySearchResults').hide();
+    $('#responseBody').show().text(prettyBody(currentBodyText));
+  }
+
+  function runTextOrRegexSearch(mode, query) {
+    const caseSensitive = $('#bodySearchCase').is(':checked');
+    let regex;
+    try {
+      regex = buildSearchRegex(mode, query, caseSensitive);
+    } catch (e) {
+      showBodySearchInvalid('invalid regex');
+      return;
+    }
+    $('#bodySearchBar').removeClass('body-search-invalid');
+    $('#bodySearchResults').hide().empty();
+    const { html, count } = highlightMatches(prettyBody(currentBodyText), regex);
+    $('#responseBody').show().html(html);
+    bodySearchHits = $('#responseBody').find('.body-search-hit').toArray();
+    $('#bodySearchClear').show();
+    if (count > 0) {
+      focusBodySearchHit(0);
+    } else {
+      bodySearchActiveIndex = -1;
+      $('#bodySearchPrev, #bodySearchNext').hide();
+      $('#bodySearchCount').text('no matches').addClass('body-search-count-zero');
+    }
+  }
+
+  function focusBodySearchHit(index) {
+    if (!bodySearchHits.length) return;
+    bodySearchHits.forEach((el) => el.classList.remove('body-search-hit-active'));
+    bodySearchActiveIndex = ((index % bodySearchHits.length) + bodySearchHits.length) % bodySearchHits.length;
+    const el = bodySearchHits[bodySearchActiveIndex];
+    el.classList.add('body-search-hit-active');
+    el.scrollIntoView({ block: 'center' });
+    $('#bodySearchPrev, #bodySearchNext').show();
+    $('#bodySearchCount').text(`${bodySearchActiveIndex + 1} of ${bodySearchHits.length}`).removeClass('body-search-count-zero');
+  }
+
+  // Shared rendering for the two "a match is a whole thing, not a text
+  // span" modes (CSS selector, JSONPath) — a scrollable list of cards
+  // instead of the inline body view, which is hidden while this is shown.
+  function renderStructuralResults(matches, totalCount, truncated, cardFn) {
+    $('#responseBody').hide();
+    const $results = $('#bodySearchResults').show().empty();
+    $('#bodySearchPrev, #bodySearchNext').hide();
+    $('#bodySearchClear').show();
+    $('#bodySearchBar').removeClass('body-search-invalid');
+    $('#bodySearchCount')
+      .text(totalCount ? `${totalCount} match${totalCount === 1 ? '' : 'es'}` : 'no matches')
+      .toggleClass('body-search-count-zero', totalCount === 0);
+    if (!totalCount) {
+      $results.html('<div class="body-search-empty">No matches.</div>');
+      return;
+    }
+    matches.forEach((m, i) => $results.append(cardFn(m, i)));
+    if (truncated) {
+      $results.append(
+        `<div class="body-search-truncated-note">Showing the first ${matches.length} of ${totalCount} matches.</div>`
+      );
+    }
+  }
+
+  function renderCssResultCard(match, index) {
+    const $card = $(`
+      <div class="body-search-result-card">
+        <div class="body-search-result-head">
+          <span class="body-search-result-index">#${index + 1}</span>
+          <span class="body-search-result-path">&lt;${escapeHtml(match.tag)}&gt;</span>
+          <div class="body-search-result-tabs">
+            <button type="button" class="body-search-result-tab active" data-view="html">HTML</button>
+            <button type="button" class="body-search-result-tab" data-view="text">Text</button>
+          </div>
+        </div>
+        <pre class="body-search-result-body"></pre>
+      </div>
+    `);
+    const showView = (view) => {
+      $card.find('.body-search-result-tab').removeClass('active').filter(`[data-view="${view}"]`).addClass('active');
+      const raw = view === 'html' ? match.html : match.text;
+      const truncated = view === 'html' ? match.html_truncated : match.text_truncated;
+      $card.find('.body-search-result-body').text(raw + (truncated ? '\n…(truncated)' : ''));
+    };
+    $card.find('.body-search-result-tab').on('click', function () {
+      showView($(this).data('view'));
+    });
+    showView('html');
+    return $card;
+  }
+
+  function runCssSearch(selector) {
+    const seq = ++bodySearchQuerySeq;
+    $('#responseBody').hide();
+    $('#bodySearchResults').show().html('<div class="body-search-empty">Searching…</div>');
+    $('#bodySearchPrev, #bodySearchNext').hide();
+    $('#bodySearchClear').show();
+    $('#bodySearchCount').text('');
+    $('#bodySearchBar').removeClass('body-search-invalid');
+
+    $.ajax({
+      url: '/api/body_query',
+      method: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ mode: 'css', body: currentBodyText, selector }),
+    })
+      .done((res) => {
+        if (seq !== bodySearchQuerySeq) return;
+        if (!res.ok) {
+          showBodySearchInvalid(res.error || 'search failed');
+          $('#bodySearchResults').show().html(`<div class="body-search-error">${escapeHtml(res.error || 'search failed')}</div>`);
+          return;
+        }
+        renderStructuralResults(res.matches, res.count, res.matches_truncated, renderCssResultCard);
+      })
+      .fail((xhr) => {
+        if (seq !== bodySearchQuerySeq) return;
+        const err = (xhr.responseJSON && xhr.responseJSON.error) || 'search failed';
+        showBodySearchInvalid(err);
+        $('#bodySearchResults').show().html(`<div class="body-search-error">${escapeHtml(err)}</div>`);
+      });
+  }
+
+  // ---- JSONPath: a deliberately small subset ----
+  //
+  // Supports, in any combination: $  .key  ['key']  [n] (negative ok)
+  // [*]  ..key (recursive descent for a key name at any depth)
+  // [start:end] (slice, no step)  [?(@.field OP value)] (OP: == != > >=
+  // < <=, or a bare @.field for a truthy check). Not a full JSONPath
+  // implementation — no unions, no script expressions, no comparing two
+  // fields against each other — this covers the common real-world cases
+  // without pulling in a third-party library for one feature.
+
+  function tokenizeJsonPath(path) {
+    const tokens = [];
+    let i = 0;
+    const n = path.length;
+    if (path[i] === '$') i++;
+    while (i < n) {
+      if (path[i] === '.' && path[i + 1] === '.') {
+        i += 2;
+        const start = i;
+        while (i < n && /[A-Za-z0-9_$]/.test(path[i])) i++;
+        if (i === start) throw new Error(`expected a key name after '..' at position ${i}`);
+        tokens.push({ type: 'recursive', key: path.slice(start, i) });
+      } else if (path[i] === '.') {
+        i++;
+        const start = i;
+        while (i < n && /[A-Za-z0-9_$]/.test(path[i])) i++;
+        if (i === start) throw new Error(`expected a key name after '.' at position ${i}`);
+        tokens.push({ type: 'member', key: path.slice(start, i) });
+      } else if (path[i] === '[') {
+        const close = path.indexOf(']', i);
+        if (close === -1) throw new Error("unterminated '['");
+        const inner = path.slice(i + 1, close).trim();
+        i = close + 1;
+        if (inner === '*') {
+          tokens.push({ type: 'wildcard' });
+        } else if (inner.startsWith('?(') && inner.endsWith(')')) {
+          tokens.push({ type: 'filter', expr: inner.slice(2, -1).trim() });
+        } else if (/^['"]/.test(inner)) {
+          const quote = inner[0];
+          if (inner.length < 2 || inner[inner.length - 1] !== quote) throw new Error(`unterminated string in [${inner}]`);
+          tokens.push({ type: 'member', key: inner.slice(1, -1) });
+        } else if (inner.includes(':')) {
+          const [a, b] = inner.split(':');
+          if (!/^-?\d*$/.test(a) || !/^-?\d*$/.test(b)) throw new Error(`can't parse slice [${inner}]`);
+          tokens.push({ type: 'slice', start: a === '' ? null : parseInt(a, 10), end: b === '' ? null : parseInt(b, 10) });
+        } else if (/^-?\d+$/.test(inner)) {
+          tokens.push({ type: 'index', index: parseInt(inner, 10) });
+        } else {
+          throw new Error(`can't parse '[${inner}]'`);
+        }
+      } else {
+        throw new Error(`unexpected character '${path[i]}' at position ${i}`);
+      }
+    }
+    return tokens;
+  }
+
+  function resolveFilterOperand(node, expr) {
+    if (expr === '@') return node;
+    if (!expr.startsWith('@.')) return undefined;
+    let cur = node;
+    for (const key of expr.slice(2).split('.')) {
+      if (cur == null || typeof cur !== 'object') return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+
+  function parseFilterLiteral(text) {
+    text = text.trim();
+    if (text === 'true') return true;
+    if (text === 'false') return false;
+    if (text === 'null') return null;
+    if (/^['"]/.test(text)) return text.slice(1, -1);
+    const num = Number(text);
+    if (!Number.isNaN(num) && text !== '') return num;
+    throw new Error(`can't parse literal '${text}'`);
+  }
+
+  const JSONPATH_FILTER_OP_RE = /^(@[\w.]*)\s*(==|!=|>=|<=|>|<)\s*(.+)$/;
+
+  const JSONPATH_OPERATOR_RE = /==|!=|>=|<=|>|</;
+
+  function evalFilterExpr(node, expr) {
+    const m = expr.match(JSONPATH_FILTER_OP_RE);
+    if (!m) {
+      // An operator character present but the whole expression still
+      // didn't match FILTER_OP_RE is a malformed comparison (e.g. a
+      // missing right-hand side, "@.price>") — worth a real error rather
+      // than silently treating "price>" as a bare (and always-false)
+      // field name.
+      if (JSONPATH_OPERATOR_RE.test(expr)) {
+        throw new Error(`can't parse filter expression '${expr}'`);
+      }
+      return !!resolveFilterOperand(node, expr.trim());
+    }
+    const [, lhsExpr, op, rhsText] = m;
+    const lhs = resolveFilterOperand(node, lhsExpr);
+    const rhs = parseFilterLiteral(rhsText);
+    switch (op) {
+      case '==': return lhs === rhs;
+      case '!=': return lhs !== rhs;
+      case '>': return lhs > rhs;
+      case '>=': return lhs >= rhs;
+      case '<': return lhs < rhs;
+      case '<=': return lhs <= rhs;
+      default: return false;
+    }
+  }
+
+  function evalJsonPath(root, path) {
+    const tokens = tokenizeJsonPath(path);   // throws on a malformed expression
+    let current = [{ path: '$', value: root }];
+    for (const token of tokens) {
+      const next = [];
+      for (const { path: p, value } of current) {
+        if (token.type === 'member') {
+          if (value != null && typeof value === 'object' && token.key in value) {
+            next.push({ path: `${p}.${token.key}`, value: value[token.key] });
+          }
+        } else if (token.type === 'index') {
+          if (Array.isArray(value)) {
+            const idx = token.index < 0 ? value.length + token.index : token.index;
+            if (idx >= 0 && idx < value.length) next.push({ path: `${p}[${token.index}]`, value: value[idx] });
+          }
+        } else if (token.type === 'slice') {
+          if (Array.isArray(value)) {
+            const len = value.length;
+            const start = token.start == null ? 0 : (token.start < 0 ? Math.max(0, len + token.start) : token.start);
+            const end = token.end == null ? len : (token.end < 0 ? len + token.end : token.end);
+            for (let idx = start; idx < Math.min(end, len); idx++) {
+              next.push({ path: `${p}[${idx}]`, value: value[idx] });
+            }
+          }
+        } else if (token.type === 'wildcard') {
+          if (Array.isArray(value)) {
+            value.forEach((v, idx) => next.push({ path: `${p}[${idx}]`, value: v }));
+          } else if (value != null && typeof value === 'object') {
+            Object.keys(value).forEach((k) => next.push({ path: `${p}.${k}`, value: value[k] }));
+          }
+        } else if (token.type === 'recursive') {
+          const found = [];
+          const walk = (cp, cv) => {
+            if (cv == null || typeof cv !== 'object') return;
+            if (Array.isArray(cv)) {
+              cv.forEach((v, idx) => walk(`${cp}[${idx}]`, v));
+            } else {
+              for (const k of Object.keys(cv)) {
+                const childPath = `${cp}.${k}`;
+                if (k === token.key) found.push({ path: childPath, value: cv[k] });
+                walk(childPath, cv[k]);
+              }
+            }
+          };
+          walk(p, value);
+          next.push(...found);
+        } else if (token.type === 'filter') {
+          if (Array.isArray(value)) {
+            value.forEach((v, idx) => {
+              if (evalFilterExpr(v, token.expr)) next.push({ path: `${p}[${idx}]`, value: v });
+            });
+          } else if (value != null && typeof value === 'object') {
+            if (evalFilterExpr(value, token.expr)) next.push({ path: p, value });
+          }
+        }
+      }
+      current = next;
+    }
+    return current;
+  }
+
+  function renderJsonPathResultCard(match, index) {
+    const $card = $(`
+      <div class="body-search-result-card">
+        <div class="body-search-result-head">
+          <span class="body-search-result-index">#${index + 1}</span>
+          <span class="body-search-result-path" title="${escapeHtml(match.path)}">${escapeHtml(match.path)}</span>
+        </div>
+        <pre class="body-search-result-body"></pre>
+      </div>
+    `);
+    $card.find('.body-search-result-body').text(JSON.stringify(match.value, null, 2));
+    return $card;
+  }
+
+  function runJsonPathSearch(path) {
+    const parsed = tryParseJson(currentBodyText);
+    if (!parsed.ok) {
+      showBodySearchInvalid("body isn't valid JSON");
+      $('#bodySearchResults').show().html(`<div class="body-search-error">Response body isn't valid JSON: ${escapeHtml(parsed.error)}</div>`);
+      return;
+    }
+    let matches;
+    try {
+      matches = evalJsonPath(parsed.value, path);
+    } catch (e) {
+      showBodySearchInvalid(e.message);
+      $('#bodySearchResults').show().html(`<div class="body-search-error">${escapeHtml(e.message)}</div>`);
+      return;
+    }
+    renderStructuralResults(matches, matches.length, false, renderJsonPathResultCard);
+  }
+
+  function runBodySearch() {
+    const mode = $('#bodySearchMode').val();
+    const query = $('#bodySearchInput').val();
+    $('#bodySearchBar').removeClass('body-search-invalid');
+    if (!query) {
+      resetBodySearchUi();
+      $('#responseBody').text(prettyBody(currentBodyText));
+      return;
+    }
+    if (mode === 'text' || mode === 'regex') {
+      runTextOrRegexSearch(mode, query);
+    } else if (mode === 'css') {
+      runCssSearch(query);
+    } else if (mode === 'jsonpath') {
+      runJsonPathSearch(query);
+    }
+  }
+
+  $('#bodySearchMode').on('change', () => $('#bodySearchInput').trigger('input'));
+  $('#bodySearchCase').on('change', () => {
+    const mode = $('#bodySearchMode').val();
+    if ((mode === 'text' || mode === 'regex') && $('#bodySearchInput').val()) runBodySearch();
+  });
+  $('#bodySearchInput').on('input', () => {
+    clearTimeout(bodySearchDebounceTimer);
+    bodySearchDebounceTimer = setTimeout(runBodySearch, 180);
+  });
+  $('#bodySearchInput').on('keydown', (e) => {
+    if (e.key !== 'Enter' || !bodySearchHits.length) return;
+    e.preventDefault();
+    focusBodySearchHit(bodySearchActiveIndex + (e.shiftKey ? -1 : 1));
+  });
+  $('#bodySearchClear').on('click', clearBodySearch);
+  $('#bodySearchNext').on('click', () => focusBodySearchHit(bodySearchActiveIndex + 1));
+  $('#bodySearchPrev').on('click', () => focusBodySearchHit(bodySearchActiveIndex - 1));
+
+
   // ---------------- Generic key/value row editor (headers, params) ----------------
 
   function addKVRow($container, key, value, keyPlaceholder, valuePlaceholder, onChange, keyListId) {
@@ -1147,6 +1611,10 @@ $(function () {
   }
 
   function renderResponse(result, requestHeaders) {
+    resetBodySearchUi();
+    currentBodyText = '';
+    currentBodyContentType = '';
+
     const cls = statusPillClass(result);
     $('#statusPill').attr('class', 'status-pill ' + cls).text(statusPillText(result));
     $('#timingStat').text(result.elapsed_ms != null ? `${result.elapsed_ms} ms` : '');
@@ -1198,6 +1666,11 @@ $(function () {
       $('#responseBody').text(prettyBody(bodyText));
       $('#sizeStat').text(bodyText ? formatBytes(new Blob([bodyText]).size) : '');
       $('#metadataTab').hide();
+      if (!result.is_binary) {
+        currentBodyText = result.body || '';
+        currentBodyContentType = result.content_type || '';
+      }
+      updateBodySearchModeAvailability();
       if ($('#metadataTab').hasClass('active')) {
         $('#responseTabs .tab[data-rtab="body"]').trigger('click');
       }
