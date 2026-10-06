@@ -627,7 +627,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(
                 503,
                 {"ok": False, "error": "beautifulsoup4 isn't installed in this venv — "
-                                        "re-run installer-linux.sh --with-requests to add it"},
+                                        "re-run the installer with --with-requests to add it"},
             )
             return
 

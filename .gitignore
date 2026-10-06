@@ -4,3 +4,7 @@ __pycache__/
 *.pem
 *.db
 *.ztr
+.env
+.hi_salt
+logs/
+*.log

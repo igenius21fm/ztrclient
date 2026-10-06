@@ -12,7 +12,7 @@ ZTRelay platform (Downloads page → "Read the docs").
 ## Requirements
 
 - Python 3.8+
-- **Linux** (systemd) — the installer is Linux-specific for now.
+- **Linux** (systemd) or **macOS** (launchd) — each has its own installer: `installer-linux.sh` and `installer-macos.sh`.
 - No manual `pip install` — the installer sets up its own isolated venv.
 
 ## Install
@@ -39,11 +39,15 @@ To pin an exact version instead, replace `${ZTR_VERSION}` with a tag from
 the [releases page](https://github.com/igenius21fm/ztrclient/releases)
 directly.
 
-Then run the installer:
+Then run the installer for your OS:
 
 ```bash
-./installer-linux.sh
+./installer-linux.sh   # Linux
+./installer-macos.sh   # macOS
 ```
+
+The two take the same flags and ask the same questions; everything below
+applies to both unless it says otherwise.
 
 With no flags, it walks you through everything interactively (see
 [Installer prompts](#installer-prompts) below) — no flags are required for a
@@ -59,11 +63,15 @@ normal install. Under the hood, it:
    optionally adds that to your `PATH` plus shell aliases — for the
    wrappers, and a `ztr_venv` alias for activating the venv from step 2
    directly, whichever of those aren't already set up.
-5. Optionally sets up `ztr_tunnel_lp.py` as a persistent `systemd --user`
-   service, and a dedicated IP for its tunneled sessions to bind to.
+5. Optionally sets up `ztr_tunnel_lp.py` as a persistent background service
+   (a `systemd --user` service on Linux, a launchd user agent on macOS),
+   and a dedicated IP for its tunneled sessions to bind to — a dummy network
+   interface on Linux, an alias on the loopback interface (`lo0`) on macOS.
 6. Optionally sets up `ztr_dashboard.py` (a local, read-only tunnel/traffic
    dashboard) the same way, reusing the same `.ztr` config and dedicated IP
    if you set both up together.
+7. Optionally sets up `ztr_requests` (a local request-composer web UI) the
+   same way, on the same dedicated IP.
 
 ### Flags
 
@@ -77,15 +85,18 @@ installs, where the interactive prompts are skipped automatically anyway
 | `--venv-dir DIR` | Put the venv at `DIR` instead of `~/.local/share/ztr/ztr_venv`. |
 | `--with-service` | Set up the tunnel service non-interactively (implies `--with-local-ip`). |
 | `--with-dashboard` | Set up the dashboard service non-interactively. |
-| `--with-local-ip` | Set up the dedicated dummy IP non-interactively. |
+| `--with-requests` | Set up the request-composer service non-interactively. |
+| `--with-local-ip` | Set up the dedicated IP non-interactively (a dummy interface on Linux, a `lo0` alias on macOS). |
 | `--local-ip IP` | Use `IP` instead of the default `10.10.15.10`. |
-| `--uninstall` | Remove everything the installer set up — wrappers, venv, both services, PATH/alias lines, dummy IP. |
+| `--uninstall` | Remove everything the installer set up — wrappers, venv, every service, PATH/alias lines, and the dedicated IP. |
 | `-h`, `--help` | Print the full usage text. |
 
 ```bash
 # fully non-interactive install, custom prefix, both services + custom IP
 ./installer-linux.sh --with-service --with-dashboard --local-ip 10.10.15.20 --prefix "$HOME/bin"
 ```
+
+On macOS, use `./installer-macos.sh` with the same flags.
 
 ## Installer prompts
 
@@ -94,6 +105,7 @@ each one only appears if it's actually relevant to your setup, so you may
 see fewer than five.
 
 **1. `Set up ztr_tunnel_lp.py as a persistent systemd --user service? [y/N]:`**
+(On macOS this reads "…as a persistent launchd user agent?".)
 Always asked first, unless you already passed `--with-service` (or you're
 running `--uninstall`, or non-interactively). This sets up a background
 service that keeps a tunnel alive across reboots/logins, instead of you
@@ -112,8 +124,10 @@ background; **`N`** to skip (run it yourself later with
 `plugins/ztr_dashboard.py` when you want it).
 
 **3. `Dummy IP for tunneled sessions to bind to [10.10.15.10]:`**
+(On macOS this reads "Loopback IP for tunneled sessions to bind to".)
 Only appears if question 1 was `y` (or `--with-local-ip`/`--with-service` was
-passed). This sets up a real dedicated network interface that
+passed). This sets up a dedicated address — a real dummy network interface on
+Linux, an extra address on the loopback interface on macOS — that
 `ztr_tunnel_lp.py`'s listeners — and the dashboard, if you're setting both up
 together — bind to, instead of the generic `127.0.0.1`.
 → **Just press Enter** to accept the default (`10.10.15.10`) unless that
@@ -124,7 +138,7 @@ address conflicts with something else on your network.
 Only asks about whichever of those two aren't already set up — e.g. just
 the `ztr_venv` alias, if `~/.local/bin` (or your `--prefix`) is already on
 your `PATH` from an earlier install. It detects your shell's rc file
-(`.zshrc`, `.bashrc`, or `.profile`) automatically.
+(`.zshrc`, `.bashrc` — `.bash_profile` on macOS — or `.profile`) automatically.
 → **Answer `y`** unless you'd rather manage your `PATH` and aliases
 yourself — the exact lines it would have added are printed either way if
 you say no, so you can copy them in by hand later.
@@ -241,9 +255,20 @@ not defined`** — you ran the installer with `sudo`. Run it as your normal
 user instead; it prompts for `sudo` itself on the one piece that actually
 needs it (the dummy network interface).
 
-**`permission denied` on `./installer-linux.sh`** — you're on a release zip
-built before v1.0.2, which shipped without the executable bit. Either
-`chmod +x installer-linux.sh` yourself, or re-download
+**`no launchd user session available for this account`** (macOS) — the
+installer couldn't reach your user's launchd session, usually because you
+reached this shell through `su`/`sudo` into the account. Log in as that user
+directly (Terminal or SSH) and re-run.
+
+**`python3 not found (or not usable)`** (macOS) — a fresh Mac has a
+`python3` stub that only prompts to install the Xcode command line tools.
+Install Python with `brew install python` or `xcode-select --install`, then
+re-run.
+
+**`permission denied` on `./installer-linux.sh`** (or `installer-macos.sh`) —
+you're on a release zip built before v1.0.2, which shipped without the
+executable bit. Either `chmod +x installer-linux.sh` (or
+`installer-macos.sh`) yourself, or re-download
 the [latest release](https://github.com/igenius21fm/ztrclient/releases/latest).
 
 **`couldn't create the venv — ... sudo apt install python3-venv`** (Linux)
@@ -309,15 +334,29 @@ internally and logged, not raised, so check `ztrclient.log` (next to
 `ztrClient.py`) for what actually went wrong instead of expecting a
 traceback.
 
+## macOS notes
+
+- **Dedicated IP.** macOS can't create a dummy interface, so
+  `--with-local-ip` adds the address as an alias on `lo0` and installs a
+  small launchd daemon (`net.ztrelay.loopback-alias`) that re-adds it on
+  every boot. Both steps need `sudo`; the installer prompts for it itself, so
+  run the installer as your normal user.
+- **Logs.** The background services log to `~/Library/Logs/ztr/<name>.log`
+  (`tunnel-lp`, `dashboard`, `requests`) rather than the journal.
+- **Dashboard live traffic.** The live-traffic panel captures through
+  `/dev/bpf*`, which macOS only lets root read by default. Without access the
+  panel stays off and the rest of the dashboard works as normal.
+
 ## Uninstall
 
 ```bash
-./installer-linux.sh --uninstall
+./installer-linux.sh --uninstall   # or ./installer-macos.sh --uninstall
 ```
 
 Removes the symlinked wrappers, the venv, whichever background services were
-set up (the tunnel service, the dashboard, or both), the PATH/alias lines
-from your rc file, and the dummy IP/interface (if any) — everything the
+set up (the tunnel service, the dashboard, the request composer, or any
+combination), the PATH/alias lines from your rc file, and the dedicated IP
+(if any) — everything the
 installer added, and nothing else. Your `routes/` folder and any `.ztr`
 configs in it are left alone.
 
@@ -344,7 +383,7 @@ configs in it are left alone.
   [README](ztrclient/routes/README.md), which documents every field in a `.ztr`
   config — the installer's `mkdir -p` would create the folder anyway, but
   it's here from the start so it's not a surprise.
-- `installer-linux.sh` — see [Install](#install).
+- `installer-linux.sh`, `installer-macos.sh` — see [Install](#install).
 
 ## Example apps
 

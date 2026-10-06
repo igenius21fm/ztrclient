@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ztr_pg — client for the ztr_tunnel_lp.py control port, pre-set for
 # Postgres. Assumes ztr_tunnel_lp.py is already running as a persistent
-# service (standalone, or under systemctl) with its own fixed .ztr config.
+# service (standalone, or under systemd/launchd) with its own fixed .ztr config.
 # This script does NOT start or stop that service — it just asks it, over
 # the control port, to open one on-demand session for a target Postgres
 # server, runs a real psql through the ephemeral local port it hands back,

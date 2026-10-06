@@ -2,10 +2,10 @@
 # Bootstraps the one thing you need before a route.ztr exists at all: your
 # own keypair, so you can hand its public half to whoever issues routes and
 # get one back. launcher.py needs pycryptodome to generate that keypair,
-# but installer-linux.sh (which normally sets up ztr's venv) expects a
+# but the installer (which normally sets up ztr's venv) expects a
 # route already in place before it's worth running — so this creates that
 # same venv on its own, installs just the one dependency launcher.py
-# actually needs, and runs it. installer-linux.sh reuses this exact venv
+# actually needs, and runs it. The installer reuses this exact venv
 # afterward instead of creating a second one.
 #
 #   ./launcher.sh
@@ -36,11 +36,11 @@ else
   log_info "creating ztr's venv at $VENV_DIR ..."
   mkdir -p "$(dirname "$VENV_DIR")"
   # --copies, not the default symlink-to-system-python3 — same reasoning as
-  # installer-linux.sh's own venv setup, which reuses this exact venv
-  # later: --with-dashboard's setcap needs a real interpreter file, not a
+  # the installer's own venv setup, which reuses this exact venv later: on
+  # Linux, --with-dashboard's setcap needs a real interpreter file, not a
   # symlink to the system one.
   if ! python3 -m venv --copies "$VENV_DIR"; then
-    log_err "couldn't create the venv — on Debian/Ubuntu you likely need: sudo apt install python3-venv"
+    log_err "couldn't create the venv — on Debian/Ubuntu you likely need: sudo apt install python3-venv (on macOS, install Python with: brew install python)"
     exit 1
   fi
   log_ok "venv created."

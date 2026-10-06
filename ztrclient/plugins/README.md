@@ -8,7 +8,8 @@ service. `ztr_https.py` is a library the others (and your own scripts) can
 import — not something you run on its own.
 
 The normal way to get all of this installed and on your `PATH` is the
-top-level [installer-linux.sh](../installer-linux.sh) — see the repo's
+top-level [installer-linux.sh](../installer-linux.sh) /
+[installer-macos.sh](../installer-macos.sh) — see the repo's
 [main README](../../README.md) for that (`--with-service`,
 `--with-dashboard`, `--with-requests` set up the three optional background
 services below). This one documents what each piece actually does, either
@@ -51,11 +52,11 @@ no matter how long it's been open.
 | `--config-file` (required) | Bare filename of your downloaded route config — resolved inside `routes/`, e.g. `route.ztr` → `routes/route.ztr`. |
 | `--control-host` | Control server bind address. Default `127.0.0.1` — this one never moves, only the per-session data listeners do. |
 | `--control-port` | Control server port. Default `2223` — matches every wrapper's own `--cp` default. |
-| `--local-ip` | Bind address for per-session data listeners. Default `10.10.15.10`, a dedicated dummy address so tunneled traffic is visually distinct from ordinary `127.0.0.1` localhost traffic (`netstat`, `ps`, logs) — set up once by `installer-linux.sh --with-local-ip`. Pass `127.0.0.1` to skip the dedicated address and use plain localhost instead. |
+| `--local-ip` | Bind address for per-session data listeners. Default `10.10.15.10`, a dedicated dummy address so tunneled traffic is visually distinct from ordinary `127.0.0.1` localhost traffic (`netstat`, `ps`, logs) — set up once by the installer's `--with-local-ip` (a dummy interface on Linux, a `lo0` alias on macOS). Pass `127.0.0.1` to skip the dedicated address and use plain localhost instead. |
 | `--idle-timeout` | Seconds a session may sit with zero active connections before the reaper closes it. Default `120`. |
 
 Run it standalone in a terminal, or let the installer set it up as a
-`systemd --user` service (`--with-service`) so it survives reboots and
+`systemd --user` service on Linux or a launchd user agent on macOS (`--with-service`) so it survives reboots and
 logins without you having to start it yourself.
 
 ## ztr_ssh, ztr_forward, ztr_pg — CLI wrappers

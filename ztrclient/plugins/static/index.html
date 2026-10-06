@@ -116,7 +116,7 @@
               <div class="term-titlebar"><span class="dot" id="term-live-dot"></span> entry-hop.feed</div>
               <div class="term-body" id="term-body"></div>
               <div class="term-footer">
-                <span id="term-footer-text">Run <code>systemctl --user restart ztr-dashboard.service</code> to restart the dashboard</span>
+                <span id="term-footer-text">Restart the dashboard with <code>systemctl --user restart ztr-dashboard.service</code> (Linux) or <code>launchctl kickstart -k gui/$(id -u)/net.ztrelay.dashboard</code> (macOS)</span>
               </div>
             </div>
           </section>
