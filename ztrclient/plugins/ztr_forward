@@ -24,6 +24,10 @@
 # --with-local-ip — not always 127.0.0.1), so don't hardcode 127.0.0.1 in
 # the wrapped command; use the env var.
 #
+# --config-file (optional) is the filename of a .ztr in routes/ — this one
+# session goes through that route. Leave it off and the session uses the
+# service's own default route.
+#
 # Requires ztr_tunnel_lp.py already running as a service — this script only
 # talks to its control port, it doesn't start or stop it.
 #
@@ -49,6 +53,7 @@ log_dim()  { echo "${C_DIM}[ztr_forward] $*${C_RESET}" >&2; }
 REAL_HOST=""
 REAL_PORT=""
 CONTROL_PORT="2223"
+CONFIG_FILE=""
 CMD_ARGS=()
 HAS_CMD=0
 
@@ -66,6 +71,14 @@ while [[ $# -gt 0 ]]; do
       CONTROL_PORT="$2"
       shift 2
       ;;
+    --config-file|--config_file)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        log_err "$1 needs a value — the filename of a .ztr config in routes/"
+        exit 1
+      fi
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
     --)
       shift
       HAS_CMD=1
@@ -74,15 +87,20 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       log_err "unrecognized argument: $1"
-      log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--cp 2223] [-- command args...]"
+      log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--config-file <name>.ztr] [--cp 2223] [-- command args...]"
       exit 1
       ;;
   esac
 done
 
 if [[ -z "$REAL_HOST" || -z "$REAL_PORT" ]]; then
-  log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--cp 2223] [-- command args...]"
+  log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--config-file <name>.ztr] [--cp 2223] [-- command args...]"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
+  exit 1
+fi
+
+if [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" == */* ]]; then
+  log_err "--config-file takes just the filename of a .ztr file in routes/, not a path: $CONFIG_FILE"
   exit 1
 fi
 
@@ -126,12 +144,15 @@ trap cleanup EXIT
 # blocking, below — there, Ctrl+C IS the intended way to stop.
 trap 'cleanup; exit 143' TERM
 
-log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT} ..."
+log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT}${CONFIG_FILE:+ (route ${CONFIG_FILE})} ..."
 
 START_PAYLOAD=$(python3 -c "
 import json, sys
-print(json.dumps({'cmd': 'start', 'relay_name': sys.argv[1], 'target_port': int(sys.argv[2])}))
-" "$REAL_HOST" "$REAL_PORT")
+req = {'cmd': 'start', 'relay_name': sys.argv[1], 'target_port': int(sys.argv[2])}
+if sys.argv[3]:
+    req['config_file'] = sys.argv[3]
+print(json.dumps(req))
+" "$REAL_HOST" "$REAL_PORT" "$CONFIG_FILE")
 
 RESPONSE=$(control_request "$START_PAYLOAD")
 if [[ -z "$RESPONSE" ]]; then
@@ -139,10 +160,12 @@ if [[ -z "$RESPONSE" ]]; then
   exit 1
 fi
 
-IFS=$'\t' read -r OK SESSION_ID LOCAL_IP LOCAL_PORT ERROR_MSG < <(python3 -c "
+# '|' rather than a tab: tab is whitespace to `read`, so empty fields (no session
+# on a failure) would collapse and shift the error message out of ERROR_MSG.
+IFS='|' read -r OK SESSION_ID LOCAL_IP LOCAL_PORT ERROR_MSG < <(python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
-print('\t'.join([str(d.get('status', False)), str(d.get('session_id', '')), str(d.get('local_ip') or '127.0.0.1'), str(d.get('local_port', '')), str(d.get('error') or '')]))
+print('|'.join([str(d.get('status', False)), str(d.get('session_id', '')), str(d.get('local_ip') or '127.0.0.1'), str(d.get('local_port', '')), str(d.get('error') or '')]))
 " "$RESPONSE")
 
 if [[ "$OK" != "True" ]]; then

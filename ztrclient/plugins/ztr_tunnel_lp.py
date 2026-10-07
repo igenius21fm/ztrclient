@@ -13,7 +13,7 @@ import time
 # (`python3 plugins/ztr_tunnel_lp.py`, which puts plugins/ on sys.path,
 # not its parent).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ztrClient import RelayClient, RelayConfig
+from ztrClient import ConfigError, ConfigFieldError, ConfigNotFoundError, ConfigParseError, RelayClient, RelayConfig
 
 """
     Generic ztrRelay local proxy service — forwards raw TCP through the
@@ -21,9 +21,10 @@ from ztrClient import RelayClient, RelayConfig
     is protocol-specific; it just moves bytes. SSH is one thing that runs
     over it (see plugins/ztr_ssh), not the only thing.
 
-    One persistent process per route (.ztr config is fixed for the whole
-    lifetime of the service — edit the file and restart to point it at a
-    different route). Run it standalone, or as a background service
+    One persistent process, started with a default route (--config-file). A
+    START request can name a different .ztr from routes/ for just that one
+    session (see below); without one, it uses the default. Run it
+    standalone, or as a background service
     (the installer's --with-service sets that up for you: systemd on Linux,
     launchd on macOS).
     Either way it needs pycryptodome, which is why the
@@ -32,7 +33,7 @@ from ztrClient import RelayClient, RelayConfig
 
         ~/.local/share/ztr/venv/bin/python3 ztr_tunnel_lp.py --config-file route.ztr
 
-    --config-file is a bare filename, not a path — RelayConfig (ztrClient.py)
+    --config-file is the default route, and a bare filename, not a path — RelayConfig (ztrClient.py)
     always resolves it inside routes/, next to ztrClient.py itself, so put
     your downloaded config at routes/route.ztr, not next to ztrClient.py
     directly and not wherever you happen to be running this from.
@@ -42,6 +43,8 @@ from ztrClient import RelayClient, RelayConfig
     JSON, one request/response object per line:
 
         START {"cmd": "start", "relay_name": "example._ztr", "target_port": 22}
+              optional: "config_file": "other.ztr"  (a bare filename in routes/ —
+              this session uses that route instead of the service's default)
           -> {"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}
           -> {"status": false, "error": "..."}
 
@@ -52,6 +55,7 @@ from ztrClient import RelayClient, RelayConfig
         LIST  {"cmd": "list"}
           -> {"status": true, "sessions": [
                 {"session_id": "...", "relay_name": "...", "target_port": 22,
+                 "config_file": "route.ztr",
                  "local_ip": "10.10.15.10", "local_port": 51234,
                  "active_connections": 1, "idle_seconds": 0.0}
               ]}
@@ -83,11 +87,44 @@ from ztrClient import RelayClient, RelayConfig
 """
 
 
-class Session:
-    __slots__ = ("client", "server", "local_port", "active_connections", "idle_since")
+class Route:
+    """The per-route settings a session needs, read from one .ztr config."""
 
-    def __init__(self, client: RelayClient, server: asyncio.AbstractServer, local_port: int):
+    __slots__ = ("config_file", "relay_port", "header_format", "raw_max_size")
+
+    def __init__(self, config_file: str):
+        conf = RelayConfig(config_file=config_file)
+        data_streams = conf.settings("data_streams")
+        self.config_file = config_file
+        self.header_format = data_streams["native"]["header_format"]
+        self.raw_max_size = data_streams["raw"]["max_size"]
+        # "ssh" here is the .ztr config's own service key (see
+        # routes.controller.js's getConfig()) — it names the relay-side
+        # channel every session in this file uses, not a protocol
+        # restriction. Nothing downstream cares what's actually forwarded.
+        self.relay_port = conf.service("ssh")["port"]
+
+
+def _is_bare_filename(name) -> bool:
+    """routes/ is flat — a config is named, never addressed by path. This is
+    the trust boundary: the control port takes input from any local process,
+    and RelayConfig joins whatever it's given onto routes/ as-is."""
+    return (
+        isinstance(name, str)
+        and 0 < len(name) <= 255
+        and name == os.path.basename(name)
+        and not name.startswith(".")
+        and "\x00" not in name
+        and "\\" not in name
+    )
+
+
+class Session:
+    __slots__ = ("client", "route", "server", "local_port", "active_connections", "idle_since")
+
+    def __init__(self, client: RelayClient, route: Route, server: asyncio.AbstractServer, local_port: int):
         self.client = client
+        self.route = route
         self.server = server
         self.local_port = local_port
         self.active_connections = 0
@@ -128,24 +165,33 @@ class TunnelProxyServer:
         self._worker_ids = itertools.count(1)
         self._sessions: dict[str, Session] = {}
 
-        # Loaded once at startup — resolves the framing/service settings
-        # every session shares. The .ztr config is fixed for this service's
-        # lifetime; a given session's target (relay_name/target_port) is
-        # supplied per START request instead, not read from here.
-        conf = RelayConfig(config_file=config_file)
+        # The default route, loaded once at startup so a bad config fails
+        # here, not on the first session. A session's target
+        # (relay_name/target_port) — and, optionally, a different route —
+        # is supplied per START request instead.
+        self.default_route = Route(config_file)
 
-        data_streams = conf.settings("data_streams")
-        self.header_format = data_streams["native"]["header_format"]
-        self.raw_max_size = data_streams["raw"]["max_size"]
+    def _resolve_route(self, config_file) -> Route:
+        """The route a START uses: the default one unless it names another
+        .ztr in routes/. Raises ValueError with a message safe to hand back
+        to the caller."""
+        if not config_file or config_file == self.config_file:
+            return self.default_route
+        if not _is_bare_filename(config_file):
+            raise ValueError("config_file must be a bare filename in routes/, not a path")
+        try:
+            return Route(config_file)
+        except ConfigNotFoundError:
+            raise ValueError(f"no routes/{config_file} — place the .ztr file in routes/ first") from None
+        except ConfigParseError:
+            raise ValueError(f"routes/{config_file} isn't valid JSON") from None
+        except ConfigFieldError as e:
+            raise ValueError(f"routes/{config_file}: {e}") from None
+        except (ConfigError, KeyError, TypeError):
+            raise ValueError(f"routes/{config_file} isn't a usable .ztr config") from None
 
-        # "ssh" here is the .ztr config's own service key (see
-        # routes.controller.js's getConfig()) — it names the relay-side
-        # channel every session in this file uses, not a protocol
-        # restriction. Nothing downstream cares what's actually forwarded.
-        self.relay_port = conf.service("ssh")["port"]
-
-    def _new_client(self, relay_name: str, target_port: int) -> RelayClient:
-        client = RelayClient(relay_name, self.relay_port, config_file=self.config_file)
+    def _new_client(self, relay_name: str, target_port: int, route: Route) -> RelayClient:
+        client = RelayClient(relay_name, route.relay_port, config_file=route.config_file)
         client.with_worker_id(next(self._worker_ids))
         client.set_target_port(target_port)
         return client
@@ -161,19 +207,19 @@ class TunnelProxyServer:
         print("[-] Failed to activate tunnel.")
         return False
 
-    async def recv_raw_HTH(self, reader: asyncio.StreamReader):
-        return await reader.read(self.raw_max_size), None
+    async def recv_raw_HTH(self, reader: asyncio.StreamReader, route: Route):
+        return await reader.read(route.raw_max_size), None
 
-    async def send_HTH(self, writer: asyncio.StreamWriter, data: bytes, session_id: str):
+    async def send_HTH(self, writer: asyncio.StreamWriter, data: bytes, session_id: str, route: Route):
         # 'c' (clear/not-for-exit) — this plugin tunnels raw, already-plaintext
         # local traffic (SSH or otherwise); it never encrypts for the exit hop.
-        header = struct.pack(self.header_format, len(data), session_id.encode("utf-8"), b'c')
+        header = struct.pack(route.header_format, len(data), session_id.encode("utf-8"), b'c')
         writer.write(header + data)
         await writer.drain()
 
     # ---------- per-session data forwarding ----------
 
-    async def forward(self, client: RelayClient, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def forward(self, client: RelayClient, route: Route, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles one local connection against an already-authorized
         session — set_tunnel() already ran back in start_session(), so this
         only ever moves bytes, whatever protocol they happen to be."""
@@ -187,10 +233,10 @@ class TunnelProxyServer:
             async def forward_client_to_tunnel():
                 try:
                     while True:
-                        data = await reader.read(self.raw_max_size)
+                        data = await reader.read(route.raw_max_size)
                         if not data:
                             break
-                        await self.send_HTH(tunnel_writer, data, client.session_id)
+                        await self.send_HTH(tunnel_writer, data, client.session_id, route)
                 except Exception as e:
                     print(f"[-] Error in client->tunnel forwarder: {e}")
                 finally:
@@ -199,7 +245,7 @@ class TunnelProxyServer:
             async def forward_tunnel_to_client():
                 try:
                     while True:
-                        data, _ = await self.recv_raw_HTH(tunnel_reader)
+                        data, _ = await self.recv_raw_HTH(tunnel_reader, route)
                         if not data:
                             break
                         writer.write(data)
@@ -222,8 +268,12 @@ class TunnelProxyServer:
 
     # ---------- session lifecycle (START / END) ----------
 
-    async def start_session(self, relay_name: str, target_port: int) -> dict:
-        client = self._new_client(relay_name, target_port)
+    async def start_session(self, relay_name: str, target_port: int, config_file=None) -> dict:
+        try:
+            route = self._resolve_route(config_file)
+        except ValueError as e:
+            return {"status": False, "error": str(e)}
+        client = self._new_client(relay_name, target_port, route)
         if not self.setup_tunnel(client, native=False):
             return {"status": False, "error": "failed to activate tunnel"}
 
@@ -234,7 +284,7 @@ class TunnelProxyServer:
             if session:
                 session.active_connections += 1
             try:
-                await self.forward(client, reader, writer)
+                await self.forward(client, route, reader, writer)
             finally:
                 session = self._sessions.get(session_id)
                 if session:
@@ -251,9 +301,9 @@ class TunnelProxyServer:
                   f"or restart this service with --local-ip 127.0.0.1 to skip the dedicated address entirely.")
             return {"status": False, "error": f"failed to bind {self.local_ip}: {e}"}
         local_port = server.sockets[0].getsockname()[1]
-        self._sessions[session_id] = Session(client=client, server=server, local_port=local_port)
+        self._sessions[session_id] = Session(client=client, route=route, server=server, local_port=local_port)
 
-        print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port}")
+        print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port} (route {route.config_file})")
         return {"status": True, "session_id": session_id, "local_ip": self.local_ip, "local_port": local_port}
 
     async def end_session(self, session_id: str) -> dict:
@@ -277,6 +327,7 @@ class TunnelProxyServer:
                 "session_id": session_id,
                 "relay_name": session.client.TARGET_HOST,
                 "target_port": session.client.TARGET_PORT,
+                "config_file": session.route.config_file,
                 "local_ip": self.local_ip,
                 "local_port": session.local_port,
                 "active_connections": session.active_connections,
@@ -323,7 +374,7 @@ class TunnelProxyServer:
                 cmd = request.get("cmd")
                 if cmd == "start":
                     response = await self.start_session(
-                        request["relay_name"], int(request.get("target_port", 22))
+                        request["relay_name"], int(request.get("target_port", 22)), request.get("config_file")
                     )
                 elif cmd == "end":
                     response = await self.end_session(request["session_id"])
@@ -361,7 +412,7 @@ def _build_arg_parser():
         description="ZTRelay local proxy service — one persistent process per route, "
         "many on-demand tunneled sessions through it via the control port."
     )
-    parser.add_argument("--config-file", required=True, help="Filename of your downloaded .ztr route config — must already be in routes/ (e.g. route.ztr resolves to routes/route.ztr)")
+    parser.add_argument("--config-file", required=True, help="Default route: the filename of your downloaded .ztr config — must already be in routes/ (e.g. route.ztr resolves to routes/route.ztr). Sessions use it unless a START request names another one.")
     parser.add_argument("--control-host", default="127.0.0.1", help="Control server bind address (default: 127.0.0.1)")
     parser.add_argument("--control-port", type=int, default=2223, help="Control server port (default: 2223)")
     parser.add_argument(

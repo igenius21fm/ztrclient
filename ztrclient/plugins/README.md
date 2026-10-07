@@ -18,19 +18,19 @@ for you.
 
 ## ztr_tunnel_lp.py — the shared tunnel service
 
-One persistent process per route — its `.ztr` config is fixed for the
-service's whole lifetime; point it at a different route by editing the file
-and restarting, not by passing a different one per session. Doesn't listen
-on a fixed data port itself. Instead it opens a small control server
+One persistent process, started with a default route (`--config-file`).
+Each session uses that route unless its `start` request names a different
+`.ztr` from `routes/` — one service can serve several routes at once.
+Doesn't listen on a fixed data port itself. Instead it opens a small control server
 (default `127.0.0.1:2223`) that speaks newline-delimited JSON, one
 request/response object per line, and the three wrappers below all talk to
 it the same way:
 
 | Request | Response |
 |---|---|
-| `{"cmd": "start", "relay_name": "example._ztr", "target_port": 22}` | `{"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}` |
+| `{"cmd": "start", "relay_name": "example._ztr", "target_port": 22}` — optionally with `"config_file": "other.ztr"` | `{"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}` |
 | `{"cmd": "end", "session_id": "..."}` | `{"status": true}` |
-| `{"cmd": "list"}` | `{"status": true, "sessions": [{"session_id": "...", "relay_name": "...", "target_port": 22, "local_ip": "10.10.15.10", "local_port": 51234, "active_connections": 1, "idle_seconds": 0.0}]}` |
+| `{"cmd": "list"}` | `{"status": true, "sessions": [{"session_id": "...", "relay_name": "...", "target_port": 22, "config_file": "route.ztr", "local_ip": "10.10.15.10", "local_port": 51234, "active_connections": 1, "idle_seconds": 0.0}]}` |
 
 Each `start` authorizes a fresh tunnel for that target and opens a new
 ephemeral local listener just for that session — so several sessions
@@ -49,7 +49,7 @@ no matter how long it's been open.
 
 | Flag | Effect |
 |---|---|
-| `--config-file` (required) | Bare filename of your downloaded route config — resolved inside `routes/`, e.g. `route.ztr` → `routes/route.ztr`. |
+| `--config-file` (required) | The service's default route: bare filename of your downloaded route config — resolved inside `routes/`, e.g. `route.ztr` → `routes/route.ztr`. Used by every session that doesn't name another one. |
 | `--control-host` | Control server bind address. Default `127.0.0.1` — this one never moves, only the per-session data listeners do. |
 | `--control-port` | Control server port. Default `2223` — matches every wrapper's own `--cp` default. |
 | `--local-ip` | Bind address for per-session data listeners. Default `10.10.15.10`, a dedicated dummy address so tunneled traffic is visually distinct from ordinary `127.0.0.1` localhost traffic (`netstat`, `ps`, logs) — set up once by the installer's `--with-local-ip` (a dummy interface on Linux, a `lo0` alias on macOS). Pass `127.0.0.1` to skip the dedicated address and use plain localhost instead. |
@@ -80,6 +80,9 @@ collides on "port already in use".
 ztr_ssh --rh "example._ztr" --rp 22
 ztr_pg -U myuser -d mydb --rh "example._ztr"
 
+# use a different route for just this session
+ztr_ssh --rh "example._ztr" --rp 22 --config-file other.ztr
+
 # ztr_forward: wait, and point something else at the tunnel yourself
 ztr_forward --rh "example._ztr" --rp 5432
 # -> tunnel ready on 10.10.15.10:51234 — point your client there, Ctrl+C to close
@@ -87,6 +90,13 @@ ztr_forward --rh "example._ztr" --rp 5432
 # ztr_forward: or run a command against it directly
 ztr_forward --rh "example._ztr" --rp 5432 -- bash -c 'psql -h "$ZTR_LOCAL_IP" -p "$ZTR_LOCAL_PORT" -U myuser'
 ```
+
+All three take an optional `--config-file <name>.ztr` (`--config_file` works
+too): the filename of a config in `routes/`, used for just that session.
+Leave it off and the session goes through the route `ztr_tunnel_lp.py` was
+started with. It's a bare filename, never a path, and the file has to
+already be in `routes/` — otherwise the wrapper prints what the service
+reported (for example `no routes/other.ztr`) and exits.
 
 `--rh` is always a route's `._ztr` alias (or a real address for a
 single-hop target), never a destination you supply directly — the actual
