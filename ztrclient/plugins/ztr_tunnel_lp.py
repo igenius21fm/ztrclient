@@ -321,6 +321,11 @@ class TunnelProxyServer:
 
         session.server.close()
         await session.server.wait_closed()
+        # The tunnel cache doubles as the record of live tunnels (the
+        # dashboard's active-tunnels view, per-port load for port selection),
+        # so an ended session's row has to go too — left alone it would keep
+        # showing as active until its TTL runs out.
+        session.client.tunnel_cache.delete(session.client.tunnel_id)
         print(f"[*] Session {session_id} ended")
         return {"status": True}
 
