@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import json
 import os
+import secrets
 import struct
 import sys
 import time
@@ -161,7 +162,14 @@ class TunnelProxyServer:
         # Distinct worker id per session, so create_tunnel_id() (ztrClient.py)
         # produces a distinct tunnel_id/session_id per session instead of
         # concurrent sessions sharing one and getting their byte streams
-        # crossed.
+        # crossed. The counter alone only separates sessions within this
+        # process: it restarts at 1 whenever the service does, and a second
+        # service for the same route would count from 1 too — either would
+        # rebuild an identical tunnel_id and pick up the other's cached
+        # session. The per-process token keeps ids unique across restarts
+        # and across services. (Different routes already differ: the route
+        # id is part of tunnel_id.)
+        self._instance_id = secrets.token_hex(4)
         self._worker_ids = itertools.count(1)
         self._sessions: dict[str, Session] = {}
 
@@ -192,7 +200,7 @@ class TunnelProxyServer:
 
     def _new_client(self, relay_name: str, target_port: int, route: Route) -> RelayClient:
         client = RelayClient(relay_name, route.relay_port, config_file=route.config_file)
-        client.with_worker_id(next(self._worker_ids))
+        client.with_worker_id(f"{self._instance_id}-{next(self._worker_ids)}")
         client.set_target_port(target_port)
         return client
 
