@@ -246,6 +246,31 @@ If you declined that prompt (or want to add it by hand — e.g. you used
 above. Run `ztr_venv` once per shell session, then just
 `python3 your_script.py` works directly — `deactivate` to leave it.
 
+## Using several routes at once
+
+One tunnel service can serve several routes at the same time. Pass
+`--config-file` to `ztr_ssh`, `ztr_pg` or `ztr_forward` to send that one
+session through a different `.ztr` from `routes/`; leave it off and the
+session uses the route the service was started with. Every session gets its
+own local port and its own tunnel, so they never interfere with each other.
+
+Only sessions started this way go through the relay — everything else on the
+machine, your browser and updates included, keeps its normal connection.
+
+![Four ztr_ssh sessions on one machine, each over its own route through a single tunnel service to four different servers, while everything else on the machine uses the normal internet connection](docs/multiple-routes.svg)
+
+```bash
+ztr_ssh --rh "server1._ztr" --rp 22 --config-file a.ztr
+ztr_ssh --rh "server2._ztr" --rp 22 --config-file b.ztr
+ztr_ssh --rh "server3._ztr" --rp 22 --config-file c.ztr
+ztr_ssh --rh "server4._ztr" --rp 22 --config-file d.ztr
+```
+
+Run each in its own terminal, with the tunnel service already running (see
+[Installer prompts](#installer-prompts)). The exit countries in the diagram
+are placeholders for whichever exits your routes use. Each server sees only
+its own route's exit address.
+
 ## Troubleshooting
 
 ### Installing
