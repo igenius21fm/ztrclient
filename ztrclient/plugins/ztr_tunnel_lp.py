@@ -93,6 +93,16 @@ from ztrClient import ConfigError, ConfigFieldError, ConfigNotFoundError, Config
     already used get a spare, and the pool is capped, so it winds down when
     you stop using them. Turn it off with --no-warm-pool.
 
+    Stale spares: an authorization is tied to the public address the entry hop
+    saw when it was made. If that address changes while a spare is waiting
+    (a new network, a VPN, a roaming ISP), the relay turns the spare away the
+    moment it's used. When a connection on a spare tunnel is closed by the
+    relay within a few seconds with nothing ever coming back, the service
+    drops every spare, authorizes a fresh tunnel, replays what the client had
+    already sent, and carries on — the client never sees the failure. This is
+    only attempted for spares, only for that early empty close, and only if
+    the client sent no more than 64 KB before the first reply.
+
     A background reaper also closes any session that's had zero active
     connections for longer than --idle-timeout — the safety net for a
     client that dies hard enough to skip sending END (a plain process kill,
@@ -145,6 +155,14 @@ class Spare:
         self.local_addr = local_addr
 
 
+def _ts():
+    return time.strftime("%H:%M:%S")
+
+
+def _fmt_bytes(n):
+    return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB"
+
+
 def _local_addr_towards(host, port):
     """The local address this machine would use to reach (host, port) — what
     changes when you move to another network. A UDP connect() only picks a
@@ -158,13 +176,19 @@ def _local_addr_towards(host, port):
 
 
 class Session:
-    __slots__ = ("client", "route", "server", "local_port", "active_connections", "idle_since")
+    __slots__ = ("client", "route", "server", "local_port", "active_connections", "idle_since", "warm", "generation", "recover_lock")
 
-    def __init__(self, client: RelayClient, route: Route, server: asyncio.AbstractServer, local_port: int):
+    def __init__(self, client: RelayClient, route: Route, server: asyncio.AbstractServer, local_port: int, warm: bool = False):
         self.client = client
         self.route = route
         self.server = server
         self.local_port = local_port
+        # True while this session still runs on a spare tunnel nobody has
+        # proven works yet. `generation` counts tunnel swaps, so connections
+        # that all fail on the same stale spare re-authorize only once.
+        self.warm = warm
+        self.generation = 0
+        self.recover_lock = asyncio.Lock()
         self.active_connections = 0
         # A session is "idle" whenever it has zero active connections — this
         # is the monotonic timestamp of when that most recently became
@@ -274,52 +298,175 @@ class TunnelProxyServer:
 
     # ---------- per-session data forwarding ----------
 
-    async def forward(self, client: RelayClient, route: Route, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    # A spare the relay turns away at once (nothing ever comes back) was almost
+    # certainly authorized under a different public address than this
+    # connection now comes from. These bound when it's safe to quietly
+    # re-authorize and replay what the client already sent.
+    RECOVERY_WINDOW = 3.0  # seconds after connecting
+    RECOVERY_BUFFER = 64 * 1024  # bytes the client may send before the first reply
+
+    async def forward(self, session: Session, route: Route, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, origin: str = ""):
         """Handles one local connection against an already-authorized
         session — set_tunnel() already ran back in start_session(), so this
-        only ever moves bytes, whatever protocol they happen to be."""
+        only ever moves bytes, whatever protocol they happen to be. `origin`
+        is only for the log line that summarizes the connection when it ends
+        (where the tunnel came from, e.g. a spare and how old).
+
+        If the session is still on a spare and the relay rejects it at once,
+        the connection is moved onto a freshly authorized tunnel (see the
+        "Stale spares" note in the module docstring)."""
         client_addr = writer.get_extra_info('peername')
-        print(f"[+] Local connection from {client_addr} (session {client.session_id})")
+        started = time.monotonic()
+        stats = {"up": 0, "down": 0, "closed_by": None, "recovered": False}
+        sent = bytearray()  # what the client has sent since the tunnel last answered
+        state = {"overflow": False}
+        print(f"[+] {_ts()} Local connection from {client_addr} (session {session.client.session_id})")
 
         try:
-            tunnel_reader, tunnel_writer = await asyncio.open_connection(client.__ENTRY__, client.PORT)
-            print(f"[+] Connected to tunnel backend {client.__ENTRY__}:{client.PORT} (session {client.session_id})")
-
-            async def forward_client_to_tunnel():
-                try:
-                    while True:
-                        data = await reader.read(route.raw_max_size)
-                        if not data:
-                            break
-                        await self.send_HTH(tunnel_writer, data, client.session_id, route)
-                except Exception as e:
-                    print(f"[-] Error in client->tunnel forwarder: {e}")
-                finally:
-                    tunnel_writer.close()
-
-            async def forward_tunnel_to_client():
-                try:
-                    while True:
-                        data, _ = await self.recv_raw_HTH(tunnel_reader, route)
-                        if not data:
-                            break
-                        writer.write(data)
-                        await writer.drain()
-                except Exception as e:
-                    print(f"[-] Error in tunnel->client forwarder: {e}")
-                finally:
+            while True:
+                gen = session.generation
+                outcome = await self._carry(
+                    session, route, reader, writer, stats, sent, state,
+                    may_recover=session.warm and not stats["recovered"],
+                )
+                if outcome != "retry":
+                    break
+                print(f"[~] {_ts()} {client_addr} the relay turned this spare tunnel away — your public address has probably changed. Re-authorizing and retrying…")
+                t0 = time.monotonic()
+                if not await self._recover(session, gen, route):
+                    stats["closed_by"] = "a failed re-authorization"
                     writer.close()
-
-            await asyncio.gather(
-                forward_client_to_tunnel(),
-                forward_tunnel_to_client()
-            )
-
+                    break
+                stats["recovered"] = True
+                print(f"[~] {_ts()} {client_addr} re-authorized in {time.monotonic() - t0:.1f}s — carrying on")
         except Exception as e:
+            stats["closed_by"] = stats["closed_by"] or "an error"
             print(f"[-] Connection handler error: {e}")
         finally:
             writer.close()
+            lasted = time.monotonic() - started
+            who = stats["closed_by"] or "unknown"
+            hint = ""
+            if who == "the relay" and stats["down"] == 0:
+                hint = "  <- nothing ever came back: the relay rejected it, or the exit couldn't reach the target"
+            elif who == "the relay" and lasted < 10:
+                hint = "  <- the relay ended this connection early"
+            extra = " · recovered from a stale spare" if stats["recovered"] else ""
+            print(
+                f"[~] {_ts()} {client_addr}{(' · ' + origin) if origin else ''}{extra} closed by {who} after {lasted:.1f}s "
+                f"— sent {_fmt_bytes(stats['up'])}, received {_fmt_bytes(stats['down'])}{hint}"
+            )
             print(f"[-] Local connection closed: {client_addr}")
+
+    async def _carry(self, session: Session, route: Route, reader, writer, stats, sent: bytearray, state, may_recover: bool) -> str:
+        """Moves bytes between the local connection and one tunnel until
+        either side closes. Returns "done", or "retry" when the relay turned
+        a spare away before answering and the caller should move the
+        connection onto a fresh tunnel (the local side is then left open)."""
+        client = session.client
+        tunnel_reader, tunnel_writer = await asyncio.open_connection(client.__ENTRY__, client.PORT)
+        print(f"[+] Connected to tunnel backend {client.__ENTRY__}:{client.PORT} (session {client.session_id})")
+        attempt_started = time.monotonic()
+        got = {"down": 0}
+        retry = {"flag": False}
+
+        # On a retry, what the client already sent goes first.
+        if sent:
+            for i in range(0, len(sent), route.raw_max_size):
+                await self.send_HTH(tunnel_writer, bytes(sent[i:i + route.raw_max_size]), client.session_id, route)
+
+        def recoverable() -> bool:
+            return (
+                may_recover
+                and got["down"] == 0
+                and len(sent) > 0
+                and not state["overflow"]
+                and time.monotonic() - attempt_started <= self.RECOVERY_WINDOW
+            )
+
+        async def forward_client_to_tunnel():
+            try:
+                while True:
+                    data = await reader.read(route.raw_max_size)
+                    if not data:
+                        stats["closed_by"] = stats["closed_by"] or "your local client"
+                        break
+                    stats["up"] += len(data)
+                    if may_recover and got["down"] == 0 and not state["overflow"]:
+                        if len(sent) + len(data) > self.RECOVERY_BUFFER:
+                            state["overflow"] = True
+                            sent.clear()
+                        else:
+                            sent.extend(data)
+                    await self.send_HTH(tunnel_writer, data, client.session_id, route)
+            except Exception as e:
+                stats["closed_by"] = stats["closed_by"] or "an error"
+                print(f"[-] Error in client->tunnel forwarder: {e}")
+            finally:
+                tunnel_writer.close()
+
+        async def forward_tunnel_to_client():
+            try:
+                while True:
+                    data, _ = await self.recv_raw_HTH(tunnel_reader, route)
+                    if not data:
+                        if recoverable():
+                            retry["flag"] = True
+                            return
+                        stats["closed_by"] = stats["closed_by"] or "the relay"
+                        break
+                    got["down"] += len(data)
+                    stats["down"] += len(data)
+                    if sent:
+                        sent.clear()  # it answered, so this tunnel works — nothing left to replay
+                    writer.write(data)
+                    await writer.drain()
+            except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError) as e:
+                if recoverable():
+                    retry["flag"] = True
+                    return
+                stats["closed_by"] = stats["closed_by"] or "the relay"
+                print(f"[-] Error in tunnel->client forwarder: {e}")
+            except Exception as e:
+                stats["closed_by"] = stats["closed_by"] or "an error"
+                print(f"[-] Error in tunnel->client forwarder: {e}")
+            finally:
+                if not retry["flag"]:
+                    writer.close()
+
+        up = asyncio.create_task(forward_client_to_tunnel())
+        down = asyncio.create_task(forward_tunnel_to_client())
+        await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
+        if retry["flag"]:
+            up.cancel()  # safe: unread data stays in the reader, and what was already read is in `sent`
+            await asyncio.gather(up, return_exceptions=True)
+            return "retry"
+        await asyncio.gather(up, down)
+        return "done"
+
+    async def _recover(self, session: Session, gen: int, route: Route) -> bool:
+        """Swaps the session onto a freshly authorized tunnel. Connections
+        that failed on the same stale spare at the same time share one
+        re-authorization: whoever gets the lock first does it, the rest see
+        the generation has moved on."""
+        async with session.recover_lock:
+            if session.generation != gen:
+                return True
+            self._drop_all_spares("a spare was turned away, so the others are probably stale too")
+            old = session.client
+            new = await asyncio.to_thread(self._authorize_new, old.TARGET_HOST, old.TARGET_PORT, route)
+            if new is None:
+                print(f"[-] Couldn't re-authorize a tunnel for {old.TARGET_HOST}:{old.TARGET_PORT}")
+                return False
+            try:
+                old.tunnel_cache.delete(old.tunnel_id)
+            except Exception:
+                pass
+            session.client = new
+            session.warm = False
+            session.generation += 1
+            self._schedule_refill((route.config_file, new.TARGET_HOST, new.TARGET_PORT), new.TARGET_HOST, new.TARGET_PORT, route)
+            return True
 
     # ---------- warm pool ----------
 
@@ -355,6 +502,10 @@ class TunnelProxyServer:
             self._discard_spare(spare, "this machine's network address changed")
             return None
         return spare
+
+    def _drop_all_spares(self, why: str):
+        for key in list(self._spares):
+            self._discard_spare(self._spares.pop(key), why)
 
     def _expire_spares(self):
         now = time.monotonic()
@@ -399,9 +550,11 @@ class TunnelProxyServer:
         key = (route.config_file, relay_name, target_port)
         spare = self._take_spare(key) if self.warm_pool else None
         warm = spare is not None
+        origin = "fresh tunnel"
         if warm:
             client = spare.client
-            print(f"[*] Using a spare tunnel for {relay_name}:{target_port} — no authorization wait")
+            origin = f"spare tunnel, {time.monotonic() - spare.created:.0f}s old"
+            print(f"[*] {_ts()} Using a spare tunnel for {relay_name}:{target_port} ({origin}) — no authorization wait")
         else:
             client = await asyncio.to_thread(self._authorize_new, relay_name, target_port, route)
             if client is None:
@@ -411,15 +564,15 @@ class TunnelProxyServer:
 
         async def handler(reader, writer):
             session = self._sessions.get(session_id)
-            if session:
-                session.active_connections += 1
+            if session is None:
+                writer.close()
+                return
+            session.active_connections += 1
             try:
-                await self.forward(client, route, reader, writer)
+                await self.forward(session, route, reader, writer, origin)
             finally:
-                session = self._sessions.get(session_id)
-                if session:
-                    session.active_connections -= 1
-                    session.idle_since = time.monotonic()
+                session.active_connections -= 1
+                session.idle_since = time.monotonic()
 
         # Port 0 -> OS picks a free ephemeral port; that's the whole fix for
         # "port already in use" when more than one session is open at once.
@@ -432,9 +585,9 @@ class TunnelProxyServer:
             client.tunnel_cache.delete(client.tunnel_id)  # nothing will use this authorization now
             return {"status": False, "error": f"failed to bind {self.local_ip}: {e}"}
         local_port = server.sockets[0].getsockname()[1]
-        self._sessions[session_id] = Session(client=client, route=route, server=server, local_port=local_port)
+        self._sessions[session_id] = Session(client=client, route=route, server=server, local_port=local_port, warm=warm)
 
-        print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port} (route {route.config_file})")
+        print(f"[*] {_ts()} Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port} (route {route.config_file}, {origin})")
         self._schedule_refill(key, relay_name, target_port, route)
         return {"status": True, "session_id": session_id, "local_ip": self.local_ip, "local_port": local_port, "warm": warm}
 
@@ -450,7 +603,7 @@ class TunnelProxyServer:
         # so an ended session's row has to go too — left alone it would keep
         # showing as active until its TTL runs out.
         session.client.tunnel_cache.delete(session.client.tunnel_id)
-        print(f"[*] Session {session_id} ended")
+        print(f"[*] {_ts()} Session {session_id} ended")
         return {"status": True}
 
     def list_sessions(self) -> dict:

@@ -58,6 +58,22 @@ would make the authorization useless. The pool only keeps spares for targets
 you've used recently and is capped, so it winds down when you stop. The
 `warm` list in `list` shows what's waiting. Turn it off with `--no-warm-pool`.
 
+#### Stale spares
+
+An authorization is tied to the public address the entry hop saw when it was
+made. If that address changes while a spare is waiting — a new network, a VPN,
+a roaming ISP — the relay turns the spare away the moment it's used. When a
+connection on a spare tunnel is closed by the relay within about three seconds
+with nothing coming back, the service drops every spare, authorizes a fresh
+tunnel, replays what the client had already sent, and carries on, so the client
+never sees the failure. It's only attempted for spares, only for that early
+empty close, and only if the client sent no more than 64 KB before the first
+reply. The service log says when it happens (`the relay turned this spare
+tunnel away… re-authorized in 0.6s`).
+
+A connection that is already open when your address changes can't be moved —
+it's gone with the old address — but starting a new one works straight away.
+
 ```bash
 ~/.local/share/ztr/ztr_venv/bin/python3 ztr_tunnel_lp.py --config-file route.ztr
 ```
