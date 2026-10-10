@@ -3,9 +3,11 @@ import itertools
 import json
 import os
 import secrets
+import socket
 import struct
 import sys
 import time
+from collections import OrderedDict
 
 # ztrClient.py lives one directory up (package root), not next to this
 # file — plain `from ztrClient import ...` only resolves by accident of
@@ -46,7 +48,7 @@ from ztrClient import ConfigError, ConfigFieldError, ConfigNotFoundError, Config
         START {"cmd": "start", "relay_name": "example._ztr", "target_port": 22}
               optional: "config_file": "other.ztr"  (a bare filename in routes/ —
               this session uses that route instead of the service's default)
-          -> {"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}
+          -> {"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234, "warm": false}
           -> {"status": false, "error": "..."}
 
         END   {"cmd": "end", "session_id": "..."}
@@ -79,6 +81,17 @@ from ztrClient import ConfigError, ConfigFieldError, ConfigNotFoundError, Config
     keep running. See plugins/ztr_ssh (always runs a real `ssh`) and
     plugins/ztr_forward (generic — waits, or runs any command you give it)
     for the two client-side wrappers that drive this over the control port.
+
+    Warm pool: authorizing a tunnel takes a couple of seconds (the hops do
+    the work), so after every START the service quietly authorizes one spare
+    tunnel for that same route and target. The next START for it takes the
+    spare and answers immediately ("warm": true), and a replacement is
+    authorized in the background. A spare is single-use and short-lived: it's
+    discarded after --warm-max-age seconds, and also if this machine's local
+    address towards the entry hop has changed (a sign you've switched
+    network, which makes the authorization useless). Only targets you've
+    already used get a spare, and the pool is capped, so it winds down when
+    you stop using them. Turn it off with --no-warm-pool.
 
     A background reaper also closes any session that's had zero active
     connections for longer than --idle-timeout — the safety net for a
@@ -120,6 +133,30 @@ def _is_bare_filename(name) -> bool:
     )
 
 
+class Spare:
+    """A tunnel that's already authorized but has no local listener yet."""
+
+    __slots__ = ("client", "route", "created", "local_addr")
+
+    def __init__(self, client: RelayClient, route: Route, local_addr):
+        self.client = client
+        self.route = route
+        self.created = time.monotonic()
+        self.local_addr = local_addr
+
+
+def _local_addr_towards(host, port):
+    """The local address this machine would use to reach (host, port) — what
+    changes when you move to another network. A UDP connect() only picks a
+    route; it sends nothing."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((host, int(port)))
+            return sock.getsockname()[0]
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 class Session:
     __slots__ = ("client", "route", "server", "local_port", "active_connections", "idle_since")
 
@@ -146,6 +183,8 @@ class TunnelProxyServer:
         control_port: int = 2223,
         local_ip: str = "10.10.15.10",
         idle_timeout: float = 120,
+        warm_pool: bool = True,
+        warm_max_age: float = 180,
     ):
         self.config_file = config_file
         self.control_host = control_host
@@ -159,6 +198,14 @@ class TunnelProxyServer:
         # start_server below fails with "Cannot assign requested address".
         self.local_ip = local_ip
         self.idle_timeout = idle_timeout
+        self.warm_pool = warm_pool
+        self.warm_max_age = warm_max_age
+        # (route, relay_name, target_port) -> Spare, oldest first. Capped so a
+        # long-lived service that has touched many targets can't pile up
+        # authorizations on the hops.
+        self._spares: "OrderedDict[tuple, Spare]" = OrderedDict()
+        self._refilling: set = set()
+        self._bg_tasks: set = set()
         # Distinct worker id per session, so create_tunnel_id() (ztrClient.py)
         # produces a distinct tunnel_id/session_id per session instead of
         # concurrent sessions sharing one and getting their byte streams
@@ -274,6 +321,74 @@ class TunnelProxyServer:
             writer.close()
             print(f"[-] Local connection closed: {client_addr}")
 
+    # ---------- warm pool ----------
+
+    MAX_WARM_TARGETS = 16
+
+    def _authorize_new(self, relay_name: str, target_port: int, route: Route):
+        """Builds a client and authorizes its tunnel. Blocking — run it in a
+        worker thread, never on the event loop (it takes seconds, and the
+        loop is also what moves every open session's bytes)."""
+        client = self._new_client(relay_name, target_port, route)
+        if not self.setup_tunnel(client, native=False):
+            return None
+        return client
+
+    def _discard_spare(self, spare: Spare, why: str):
+        print(f"[*] Dropping a spare tunnel for {spare.client.TARGET_HOST}:{spare.client.TARGET_PORT} — {why}")
+        try:
+            spare.client.tunnel_cache.delete(spare.client.tunnel_id)
+        except Exception:
+            pass
+
+    def _take_spare(self, key):
+        """A usable spare for this target, or None. Never hands out one that
+        has aged out or whose local network has changed."""
+        spare = self._spares.pop(key, None)
+        if spare is None:
+            return None
+        if time.monotonic() - spare.created > self.warm_max_age:
+            self._discard_spare(spare, "too old")
+            return None
+        now_addr = _local_addr_towards(spare.client.__ENTRY__, spare.client.PORT)
+        if spare.local_addr and now_addr and spare.local_addr != now_addr:
+            self._discard_spare(spare, "this machine's network address changed")
+            return None
+        return spare
+
+    def _expire_spares(self):
+        now = time.monotonic()
+        for key in [k for k, sp in self._spares.items() if now - sp.created > self.warm_max_age]:
+            self._discard_spare(self._spares.pop(key), "unused for too long")
+
+    async def _refill(self, key, relay_name: str, target_port: int, route: Route):
+        """Authorizes one spare for this target in the background. A failure
+        just means the next START pays the full wait — no retry loop."""
+        if not self.warm_pool or key in self._spares or key in self._refilling:
+            return
+        self._refilling.add(key)
+        try:
+            client = await asyncio.to_thread(self._authorize_new, relay_name, target_port, route)
+            if client is None:
+                print(f"[-] Couldn't pre-authorize a spare for {relay_name}:{target_port}")
+                return
+            self._spares[key] = Spare(client, route, _local_addr_towards(client.__ENTRY__, client.PORT))
+            while len(self._spares) > self.MAX_WARM_TARGETS:
+                _, oldest = self._spares.popitem(last=False)
+                self._discard_spare(oldest, "pool is full")
+            print(f"[*] Spare tunnel ready for {relay_name}:{target_port} (route {route.config_file})")
+        except Exception as e:
+            print(f"[-] Spare tunnel for {relay_name}:{target_port} failed: {e}")
+        finally:
+            self._refilling.discard(key)
+
+    def _schedule_refill(self, key, relay_name: str, target_port: int, route: Route):
+        if not self.warm_pool:
+            return
+        task = asyncio.create_task(self._refill(key, relay_name, target_port, route))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     # ---------- session lifecycle (START / END) ----------
 
     async def start_session(self, relay_name: str, target_port: int, config_file=None) -> dict:
@@ -281,9 +396,16 @@ class TunnelProxyServer:
             route = self._resolve_route(config_file)
         except ValueError as e:
             return {"status": False, "error": str(e)}
-        client = self._new_client(relay_name, target_port, route)
-        if not self.setup_tunnel(client, native=False):
-            return {"status": False, "error": "failed to activate tunnel"}
+        key = (route.config_file, relay_name, target_port)
+        spare = self._take_spare(key) if self.warm_pool else None
+        warm = spare is not None
+        if warm:
+            client = spare.client
+            print(f"[*] Using a spare tunnel for {relay_name}:{target_port} — no authorization wait")
+        else:
+            client = await asyncio.to_thread(self._authorize_new, relay_name, target_port, route)
+            if client is None:
+                return {"status": False, "error": "failed to activate tunnel"}
 
         session_id = client.session_id
 
@@ -307,12 +429,14 @@ class TunnelProxyServer:
             print(f"[-] Failed to bind {self.local_ip}: {e}")
             print(f"[-] Run the installer (installer-linux.sh / installer-macos.sh) with --with-local-ip to set up {self.local_ip}, "
                   f"or restart this service with --local-ip 127.0.0.1 to skip the dedicated address entirely.")
+            client.tunnel_cache.delete(client.tunnel_id)  # nothing will use this authorization now
             return {"status": False, "error": f"failed to bind {self.local_ip}: {e}"}
         local_port = server.sockets[0].getsockname()[1]
         self._sessions[session_id] = Session(client=client, route=route, server=server, local_port=local_port)
 
         print(f"[*] Session {session_id} ready on {self.local_ip}:{local_port} -> {relay_name}:{target_port} (route {route.config_file})")
-        return {"status": True, "session_id": session_id, "local_ip": self.local_ip, "local_port": local_port}
+        self._schedule_refill(key, relay_name, target_port, route)
+        return {"status": True, "session_id": session_id, "local_ip": self.local_ip, "local_port": local_port, "warm": warm}
 
     async def end_session(self, session_id: str) -> dict:
         session = self._sessions.pop(session_id, None)
@@ -348,7 +472,16 @@ class TunnelProxyServer:
             }
             for session_id, session in self._sessions.items()
         ]
-        return {"status": True, "sessions": sessions}
+        warm = [
+            {
+                "relay_name": sp.client.TARGET_HOST,
+                "target_port": sp.client.TARGET_PORT,
+                "config_file": sp.route.config_file,
+                "age_seconds": round(now - sp.created, 1),
+            }
+            for sp in self._spares.values()
+        ]
+        return {"status": True, "sessions": sessions, "warm": warm}
 
     # ---------- idle session reaper ----------
 
@@ -359,6 +492,7 @@ class TunnelProxyServer:
         touches sessions currently sitting at zero active connections."""
         while True:
             await asyncio.sleep(scan_interval)
+            self._expire_spares()
             now = time.monotonic()
             stale = [
                 session_id
@@ -409,6 +543,7 @@ class TunnelProxyServer:
         control_server = await asyncio.start_server(self.handle_control, self.control_host, self.control_port)
         print(f"[*] Control server listening on {self.control_host}:{self.control_port}")
         print(f"[*] Idle session reaper active — timeout {self.idle_timeout}s")
+        print(f"[*] Warm pool {'on — spares expire after ' + str(int(self.warm_max_age)) + 's' if self.warm_pool else 'off'}")
 
         reaper_task = asyncio.create_task(self._reap_idle_sessions())
         try:
@@ -441,6 +576,17 @@ def _build_arg_parser():
         default=120,
         help="Seconds a session may sit with zero active connections before the reaper closes it (default: 120)",
     )
+    parser.add_argument(
+        "--no-warm-pool",
+        action="store_true",
+        help="Don't pre-authorize a spare tunnel after each session. Every start then waits for its own authorization.",
+    )
+    parser.add_argument(
+        "--warm-max-age",
+        type=float,
+        default=180,
+        help="Seconds a spare tunnel may wait unused before it's discarded (default: 180)",
+    )
     return parser
 
 
@@ -452,6 +598,8 @@ if __name__ == "__main__":
         control_port=args.control_port,
         local_ip=args.local_ip,
         idle_timeout=args.idle_timeout,
+        warm_pool=not args.no_warm_pool,
+        warm_max_age=args.warm_max_age,
     )
     try:
         asyncio.run(proxy_server.start())

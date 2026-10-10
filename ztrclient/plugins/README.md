@@ -28,11 +28,11 @@ it the same way:
 
 | Request | Response |
 |---|---|
-| `{"cmd": "start", "relay_name": "example._ztr", "target_port": 22}` — optionally with `"config_file": "other.ztr"` | `{"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234}` |
+| `{"cmd": "start", "relay_name": "example._ztr", "target_port": 22}` — optionally with `"config_file": "other.ztr"` | `{"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234, "warm": false}` |
 | `{"cmd": "end", "session_id": "..."}` | `{"status": true}` |
-| `{"cmd": "list"}` | `{"status": true, "sessions": [{"session_id": "...", "relay_name": "...", "target_port": 22, "config_file": "route.ztr", "local_ip": "10.10.15.10", "local_port": 51234, "active_connections": 1, "idle_seconds": 0.0}]}` |
+| `{"cmd": "list"}` | `{"status": true, "sessions": [{"session_id": "...", "relay_name": "...", "target_port": 22, "config_file": "route.ztr", "local_ip": "10.10.15.10", "local_port": 51234, "active_connections": 1, "idle_seconds": 0.0}], "warm": [{"relay_name": "...", "target_port": 22, "config_file": "route.ztr", "age_seconds": 12.4}]}` |
 
-Each `start` authorizes a fresh tunnel for that target and opens a new
+Each `start` hands out a freshly authorized tunnel for that target and opens a new
 ephemeral local listener just for that session — so several sessions
 (different terminals, different targets, doesn't matter) each get their own
 local port instead of fighting over one fixed one. `end` tears down that
@@ -42,6 +42,21 @@ connections longer than `--idle-timeout` — the safety net for a client that
 dies hard enough to skip sending `end` (a plain process kill doesn't run a
 wrapper's cleanup trap). A session with a live connection is never touched,
 no matter how long it's been open.
+
+### Warm pool
+
+Authorizing a tunnel takes a couple of seconds — the hops do the work — so
+after every `start` the service quietly authorizes one spare tunnel for that
+same route and target. The next `start` for it takes the spare and answers
+immediately (`"warm": true`), and a replacement is authorized in the
+background. The first `start` for a target you haven't used yet still waits.
+
+A spare is single-use and short-lived. It's discarded after
+`--warm-max-age` seconds unused, and also if this machine's local address
+towards the entry hop has changed — a sign you've switched network, which
+would make the authorization useless. The pool only keeps spares for targets
+you've used recently and is capped, so it winds down when you stop. The
+`warm` list in `list` shows what's waiting. Turn it off with `--no-warm-pool`.
 
 ```bash
 ~/.local/share/ztr/ztr_venv/bin/python3 ztr_tunnel_lp.py --config-file route.ztr
@@ -54,6 +69,8 @@ no matter how long it's been open.
 | `--control-port` | Control server port. Default `2223` — matches every wrapper's own `--cp` default. |
 | `--local-ip` | Bind address for per-session data listeners. Default `10.10.15.10`, a dedicated dummy address so tunneled traffic is visually distinct from ordinary `127.0.0.1` localhost traffic (`netstat`, `ps`, logs) — set up once by the installer's `--with-local-ip` (a dummy interface on Linux, a `lo0` alias on macOS). Pass `127.0.0.1` to skip the dedicated address and use plain localhost instead. |
 | `--idle-timeout` | Seconds a session may sit with zero active connections before the reaper closes it. Default `120`. |
+| `--warm-max-age` | Seconds a pre-authorized spare tunnel may wait unused before it's discarded. Default `180`. |
+| `--no-warm-pool` | Don't pre-authorize spares; every `start` waits for its own authorization. |
 
 Run it standalone in a terminal, or let the installer set it up as a
 `systemd --user` service on Linux or a launchd user agent on macOS (`--with-service`) so it survives reboots and
