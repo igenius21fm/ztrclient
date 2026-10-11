@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Linux installer for the ZTRelay plugin wrappers (ztr_ssh, ztr_forward,
-# ztr_pg) so they run from anywhere, without a manual shell alias per
+# ztr_pg, and ztr_ferry — the launcher for the Ferry file manager) so they
+# run from anywhere, without a manual shell alias per
 # docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
 # ztrClient.py itself — this is scoped to plugins/ only (which is also
 # where ztr_tunnel_lp.py, ztr_dashboard.py, ztr_https.py, and ztr_requests/
@@ -12,19 +13,21 @@
 #   ./installer-linux.sh --with-service        also set up ztr_tunnel_lp.py as a systemd --user service
 #   ./installer-linux.sh --with-dashboard      also set up ztr_dashboard.py as a systemd --user service
 #   ./installer-linux.sh --with-requests       also set up ztr_requests (request-composer web UI) as a systemd --user service
+#   ./installer-linux.sh --with-ferry          also add Ferry (the file manager) to your applications menu, and check what it needs
 #   ./installer-linux.sh --with-local-ip       also set up a dedicated dummy interface for tunneled sessions
 #   ./installer-linux.sh --local-ip IP         use IP instead of the default 10.10.15.10
 #   ./installer-linux.sh --uninstall           remove the installed wrappers (services, venv, and dummy interface, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up each service, and (if any of the three, or if --with-local-ip was
-# passed) what IP to use. --with-service/--with-dashboard/--with-requests/
+# up each service, whether to add Ferry to your applications menu, and (if
+# any of the three services, or if --with-local-ip was passed) what IP to
+# use. --with-service/--with-dashboard/--with-requests/--with-ferry/
 # --with-local-ip/--local-ip above are for skipping those prompts —
 # non-interactive runs (CI, provisioning scripts, piped input) skip them
 # automatically and just take the flags/defaults given.
 #
 # What it actually does:
-#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg} executable — a zip
+#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry} executable — a zip
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
 #   2. Checks that python3 exists, then creates a dedicated venv for ztr
@@ -38,8 +41,8 @@
 #      offers to install scapy into it — only needed for the dashboard's
 #      live traffic panel. With --with-requests, also installs Pillow —
 #      ztr_requests/server.py needs it to sniff/decode image responses.
-#   3. Symlinks the three wrappers into --prefix (default ~/.local/bin),
-#      so `ztr_ssh`/`ztr_forward`/`ztr_pg` work from any shell, not just
+#   3. Symlinks the wrappers into --prefix (default ~/.local/bin), so
+#      `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: creates ztr_i0, a real dummy interface (`ip
 #      link add ztr_i0 type dummy`), and binds --local-ip (default
@@ -64,11 +67,18 @@
 #      carry a route's real identifier/secret_key-backed tunnel. No route
 #      config needed up front; it picks one per request from whatever's in
 #      routes/.
+#   8. With --with-ferry: checks what Ferry (plugins/ztr_ferry.py, a
+#      two-pane file manager) needs — Python's tkinter for its window,
+#      rsync for folders and larger files, ssh — and tells you the apt
+#      package for anything missing. Then adds Ferry to your applications
+#      menu (a .desktop launcher plus its icon under ~/.local/share), so it
+#      opens like any other app. Ferry itself needs no pip packages, so it
+#      doesn't use the venv. `ztr_ferry` from a terminal works either way.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$SCRIPT_DIR/plugins"
-WRAPPERS=(ztr_ssh ztr_forward ztr_pg)
+WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry)
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 VENV_DIR="${VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}"
@@ -80,6 +90,8 @@ WITH_DASHBOARD=0
 WITH_DASHBOARD_SET_BY_USER=0
 WITH_REQUESTS=0
 WITH_REQUESTS_SET_BY_USER=0
+WITH_FERRY=0
+WITH_FERRY_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 
@@ -95,7 +107,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,66p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -121,6 +133,11 @@ while [[ $# -gt 0 ]]; do
     --with-requests)
       WITH_REQUESTS=1
       WITH_REQUESTS_SET_BY_USER=1
+      shift
+      ;;
+    --with-ferry)
+      WITH_FERRY=1
+      WITH_FERRY_SET_BY_USER=1
       shift
       ;;
     --with-local-ip)
@@ -153,6 +170,9 @@ DASHBOARD_SERVICE_UNIT="$HOME/.config/systemd/user/ztr-dashboard.service"
 REQUESTS_SERVICE_UNIT="$HOME/.config/systemd/user/ztr-requests.service"
 IFACE_NAME="ztr_i0"
 DUMMY_IF_UNIT="/etc/systemd/system/ztr-dummy-if.service"
+XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+FERRY_DESKTOP="$XDG_DATA/applications/ztr-ferry.desktop"
+FERRY_ICON="$XDG_DATA/icons/hicolor/128x128/apps/ztr-ferry.png"
 
 # Ask up front rather than requiring you to already know the flag exists —
 # only when you didn't already say one way or the other with --with-service,
@@ -182,6 +202,15 @@ if [[ "$WITH_REQUESTS_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Set up ztr_requests (Postman-style request UI) as a persistent systemd --user service? [y/N]: " WITH_REQUESTS_ANSWER
   case "$WITH_REQUESTS_ANSWER" in
     [yY]*) WITH_REQUESTS=1 ;;
+  esac
+fi
+
+# Ferry is a desktop app, so this only makes sense on a machine with a screen —
+# a plain yes/no, separate from the services above (it works with or without them).
+if [[ "$WITH_FERRY_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Add Ferry (the file manager) to your applications menu? [y/N]: " WITH_FERRY_ANSWER
+  case "$WITH_FERRY_ANSWER" in
+    [yY]*) WITH_FERRY=1 ;;
   esac
 fi
 
@@ -249,6 +278,13 @@ uninstall() {
     fi
   done
   [[ "$removed" -eq 1 ]] && log_ok "wrappers removed." || log_warn "no installed wrappers found in $PREFIX."
+
+  if [[ -f "$FERRY_DESKTOP" ]] && grep -q "ztrclient installer" "$FERRY_DESKTOP" 2>/dev/null; then
+    log_info "removing Ferry from your applications menu ..."
+    rm -f "$FERRY_DESKTOP" "$FERRY_ICON"
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$FERRY_DESKTOP")" >/dev/null 2>&1 || true
+    log_ok "Ferry launcher removed."
+  fi
 
   if [[ -f "$SERVICE_UNIT" ]]; then
     log_info "stopping and removing the ztr-tunnel-lp systemd service ..."
@@ -515,6 +551,58 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Ferry: check what it needs, then give it a place in the applications menu.
+# Nothing here is installed for you (tkinter and rsync come from the system's
+# package manager, not pip) — a missing piece just gets named with its apt
+# package, so Ferry's own error never has to.
+if [[ "$WITH_FERRY" -eq 1 ]]; then
+  log_info "setting up Ferry (the file manager) ..."
+
+  if python3 -c 'import tkinter' >/dev/null 2>&1; then
+    log_ok "tkinter found — Ferry's window will work."
+  else
+    log_warn "Python's tkinter isn't installed — Ferry needs it for its window. On Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+  fi
+  if command -v rsync >/dev/null 2>&1; then
+    log_ok "rsync found."
+  else
+    log_warn "rsync isn't installed — Ferry still moves a few small files without it, but folders and larger files need it: sudo apt install rsync"
+  fi
+  if command -v ssh >/dev/null 2>&1; then
+    log_ok "ssh found."
+  else
+    log_warn "ssh isn't installed — Ferry can't connect without it: sudo apt install openssh-client"
+  fi
+  if command -v tar >/dev/null 2>&1 && tar --version 2>/dev/null | grep -q "GNU tar"; then
+    log_ok "GNU tar found — small transfers will take the fast path."
+  else
+    log_info "no GNU tar here — Ferry will use rsync for small transfers too (slower on a slow route, otherwise the same)."
+  fi
+  command -v setsid >/dev/null 2>&1 || log_warn "setsid not found (util-linux) — 'ztr_ferry' needs it to open Ferry without tying up the terminal."
+
+  if python3 "$PLUGINS_DIR/ztr_ferry.py" --write-icon "$FERRY_ICON"; then
+    mkdir -p "$(dirname "$FERRY_DESKTOP")"
+    cat > "$FERRY_DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Ferry
+GenericName=File manager for ZTRelay servers
+Comment=Files between this computer and your servers, over ZTRelay
+Exec="$PLUGINS_DIR/ztr_ferry"
+Icon=$FERRY_ICON
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=ztr;ztrelay;ssh;sftp;files;transfer;
+# written by the ztrclient installer (--uninstall removes it)
+EOF
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$FERRY_DESKTOP")" >/dev/null 2>&1 || true
+    log_ok "Ferry added to your applications menu ($FERRY_DESKTOP)."
+  else
+    log_warn "couldn't write Ferry's icon — skipping the applications-menu entry (ztr_ferry still works from a terminal)."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 if [[ "$WITH_LOCAL_IP" -eq 1 ]]; then
   log_info "setting up $IFACE_NAME as a dummy interface bound to $LOCAL_IP (needs sudo) ..."
 
@@ -733,3 +821,6 @@ fi
 
 echo
 log_ok "done. Try: ztr_ssh --rh \"example._ztr\" --rp 22"
+if [[ "$WITH_FERRY" -eq 1 ]]; then
+  log_ok "and for the file manager: ztr_ferry   (or find Ferry in your applications menu)"
+fi

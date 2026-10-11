@@ -2,7 +2,8 @@
 
 Everything here builds on `ztrClient.py` (one directory up). Three thin CLI
 wrappers — `ztr_ssh`, `ztr_forward`, `ztr_pg` — drive tunnels through a
-shared background service, `ztr_tunnel_lp.py`; `ztr_dashboard.py` and
+shared background service, `ztr_tunnel_lp.py`, and so does Ferry
+(`ztr_ferry.py`), a desktop file manager; `ztr_dashboard.py` and
 `ztr_requests/` are separate, standalone tools with no dependency on that
 service. `ztr_https.py` is a library the others (and your own scripts) can
 import — not something you run on its own.
@@ -277,10 +278,69 @@ combination, request history, named environments, saved requests, batch
 run results) — all local to this directory, no shared database with
 anything else here.
 
+## ztr_ferry.py — Ferry, a file manager
+
+Ferry is a two-pane file manager for servers you reach through a route: your
+computer on the left, the server on the right. Connect once, then browse,
+drag files across (or double-click them), rename, delete, change permissions,
+search, and open a server file in your editor — saving it uploads it again.
+It needs the tunnel service (`ztr_tunnel_lp.py`) to be running, the same as
+`ztr_ssh` does.
+
+```bash
+ztr_ferry                 # opens Ferry; the terminal comes straight back
+ztr_ferry --foreground    # stay attached to the terminal and show errors live
+```
+
+With `--with-ferry` the installer also adds Ferry to your applications menu.
+It runs on a Linux desktop and needs Python's tkinter (`sudo apt install
+python3-tk`), `rsync` and `ssh`; GNU `tar` is used for a faster path on small
+transfers when it's there. It needs no pip packages.
+
+**How it connects.** Each tab asks the tunnel service for one session to the
+server and opens a single ssh connection through it. Listings, folder
+changes and every transfer reuse that connection, so you sign in once per
+tab. Passwords are handed to ssh through a throwaway helper and never saved
+or written to disk.
+
+**What it does for you.**
+
+- **Tabs.** One connection per tab (`Ctrl+T` opens one, `Ctrl+W` closes it),
+  each with its own queue and log. Saved sites and bookmarks are shared.
+- **Transfers.** Everything goes through a queue you can cancel, retry and
+  clear. Queued transfers headed the same way are merged into one rsync, so
+  five files cost one start-up instead of five. A few small files (up to 40
+  files / 8 MB from one folder) skip rsync and stream as one tar over the open
+  connection — much quicker on a slow route, where rsync's start-up alone
+  can take several seconds. Elapsed time and the average speed are shown for
+  each transfer.
+- **Settings** (the cog in the header, or `Ctrl+,`). What to do when a file
+  already exists (skip, overwrite if newer, overwrite), a speed limit,
+  compression, preview-only, folder comparison and hidden files. *Parallel
+  batches* splits a large transfer into streams that run together; it is off
+  by default because on a single route the streams share its bandwidth and
+  measured slower than one stream.
+- **The `ztr_ssh` button** opens a terminal on the server you're connected
+  to, running `ztr_ssh` with the same user, key and route. It passes
+  host-key options that keep each terminal session's host key out of your
+  `~/.ssh/known_hosts`, so several servers behind the same tunnel address
+  never trip "remote host identification has changed".
+- **Host keys** for Ferry's own connections go in a throwaway file that is
+  deleted with the connection; nothing about the servers you visit is kept on
+  disk. A changed key between sessions is therefore not detected — the same
+  trade-off `ztr_ssh` makes.
+
+**Where things live.** Saved sites, bookmarks and settings are in
+`~/.config/ztr_ferry/` (no passwords). `FERRY_TERMINAL` (for example
+`xterm -e`) chooses the terminal the `ztr_ssh` button opens, `FERRY_ZTR_SSH`
+points it at a different `ztr_ssh`, and `ZTR_FERRY_HOME` moves the settings
+folder.
+
 ## Layout
 
 - `ztr_tunnel_lp.py` — the shared tunnel service every wrapper below talks to.
 - `ztr_ssh`, `ztr_forward`, `ztr_pg` — CLI wrappers around it.
+- `ztr_ferry` + `ztr_ferry.py` — the Ferry file manager and its launcher.
 - `ztr_dashboard.py` + `static/` — the standalone local dashboard.
 - `ztr_https.py` — HTTP(S)-over-tunnel client library.
 - `ztr_requests/` — the standalone request-composer web UI, built on it.

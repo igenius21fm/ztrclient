@@ -4,7 +4,8 @@ The ZTRelay client — authorizes and drives an encrypted multi-hop tunnel
 through the ZTRelay network. Turns a `.ztr` route config (downloaded from
 your dashboard) into a live connection, and ships with three ready-to-use
 plugin wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`) so you don't have to
-write any code to use it.
+write any code to use it — plus Ferry, a file manager for your servers
+(see [Ferry](#ferry--a-file-manager)).
 
 Full API reference and walkthroughs: see the ztrClient.py docs on the
 ZTRelay platform (Downloads page → "Read the docs").
@@ -14,6 +15,7 @@ ZTRelay platform (Downloads page → "Read the docs").
 - Python 3.8+
 - **Linux** (systemd) or **macOS** (launchd) — each has its own installer: `installer-linux.sh` and `installer-macos.sh`.
 - No manual `pip install` — the installer sets up its own isolated venv.
+- For Ferry (optional, Linux desktop only): Python's `tkinter`, `rsync` and `ssh`.
 
 ## Install
 
@@ -86,6 +88,7 @@ installs, where the interactive prompts are skipped automatically anyway
 | `--with-service` | Set up the tunnel service non-interactively (implies `--with-local-ip`). |
 | `--with-dashboard` | Set up the dashboard service non-interactively. |
 | `--with-requests` | Set up the request-composer service non-interactively. |
+| `--with-ferry` | Add Ferry to your applications menu and check what it needs (Linux only). |
 | `--with-local-ip` | Set up the dedicated IP non-interactively (a dummy interface on Linux, a `lo0` alias on macOS). |
 | `--local-ip IP` | Use `IP` instead of the default `10.10.15.10`. |
 | `--uninstall` | Remove everything the installer set up — wrappers, venv, every service, PATH/alias lines, and the dedicated IP. |
@@ -100,9 +103,8 @@ On macOS, use `./installer-macos.sh` with the same flags.
 
 ## Installer prompts
 
-Run with no flags in a real terminal, you'll be asked up to five questions —
-each one only appears if it's actually relevant to your setup, so you may
-see fewer than five.
+Run with no flags in a real terminal, you'll be asked a few questions —
+each one only appears if it's actually relevant to your setup.
 
 **1. `Set up ztr_tunnel_lp.py as a persistent systemd --user service? [y/N]:`**
 (On macOS this reads "…as a persistent launchd user agent?".)
@@ -153,6 +155,13 @@ a bare filename (`route.ztr`), not a path.
 → If you don't have one there yet, answer with a nonexistent filename — the
 installer skips service setup cleanly and tells you to re-run with
 `--with-service`/`--with-dashboard` once the file's actually in `routes/`.
+
+**6. `Add Ferry (the file manager) to your applications menu? [y/N]:`**
+(Linux only; asked right after the service questions.) Adds a launcher and
+icon for Ferry under `~/.local/share`, and checks that Python's `tkinter`,
+`rsync` and `ssh` are there — anything missing is named with the `apt`
+package that provides it. `ztr_ferry` works from any terminal whichever way
+you answer.
 
 ## Getting connected
 
@@ -271,6 +280,15 @@ Run each in its own terminal, with the tunnel service already running (see
 are placeholders for whichever exits your routes use. Each server sees only
 its own route's exit address.
 
+## Ferry — a file manager
+
+`ztr_ferry` opens Ferry: your computer on one side, a server on the other,
+with tabs, a transfer queue, bookmarks, saved sites, and a button that opens
+a `ztr_ssh` terminal into the server you're on. It rides on the same tunnel
+service as `ztr_ssh`. Linux desktop only for now (`installer-macos.sh` does
+not install it). See [plugins/README.md](ztrclient/plugins/README.md#ztr_ferrypy--ferry-a-file-manager)
+for how it works and what it can do.
+
 ## Troubleshooting
 
 ### Installing
@@ -361,6 +379,9 @@ traceback.
 
 ## macOS notes
 
+- **Ferry.** The file manager is Linux-only for now, so the macOS installer
+  doesn't install `ztr_ferry` or take `--with-ferry`.
+
 - **Dedicated IP.** macOS can't create a dummy interface, so
   `--with-local-ip` adds the address as an alias on `lo0` and installs a
   small launchd daemon (`net.ztrelay.loopback-alias`) that re-adds it on
@@ -378,7 +399,7 @@ traceback.
 ./installer-linux.sh --uninstall   # or ./installer-macos.sh --uninstall
 ```
 
-Removes the symlinked wrappers, the venv, whichever background services were
+Removes the symlinked wrappers, Ferry's menu launcher and icon, the venv, whichever background services were
 set up (the tunnel service, the dashboard, the request composer, or any
 combination), the PATH/alias lines from your rc file, and the dedicated IP
 (if any) — everything the
@@ -395,8 +416,9 @@ configs in it are left alone.
 - `launcher.sh` — bootstraps ztr's venv (same one the installer uses) and
   runs `launcher.py` through it — the one thing you need before a
   `route.ztr` exists at all, so it works standalone, without the installer.
-- `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_tunnel_lp.py` (the
-  persistent tunnel service target), and `ztr_dashboard.py` (the local
+- `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry` (the Ferry
+  file manager's launcher, with `ztr_ferry.py` behind it), `ztr_tunnel_lp.py`
+  (the persistent tunnel service target), and `ztr_dashboard.py` (the local
   tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
   build step). See [plugins/README.md](ztrclient/plugins/README.md) for what each one
   actually does — the shared control-port protocol, every flag, and real

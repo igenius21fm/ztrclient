@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# ztr_ferry — opens Ferry, the two-pane file manager for servers reached
+# through a ZTRelay route (see ztr_ferry.py and plugins/README.md).
+#
+#   ztr_ferry                 open Ferry; the terminal comes straight back
+#   ztr_ferry --foreground    keep it attached to this terminal (shows errors live)
+#
+# Like ztr_ssh, this assumes ztr_tunnel_lp.py is already running as a
+# persistent service — Ferry asks it for a tunnel when you click Connect.
+# Linux only.
+set -u -o pipefail
+
+if [[ -t 2 ]]; then
+  C_ERR=$'\033[0;31m'; C_WARN=$'\033[0;33m'; C_RESET=$'\033[0m'
+else
+  C_ERR=""; C_WARN=""; C_RESET=""
+fi
+log_err()  { echo "${C_ERR}[ztr_ferry] $*${C_RESET}" >&2; }
+log_warn() { echo "${C_WARN}[ztr_ferry]${C_RESET} $*" >&2; }
+
+# Follow the symlink the installer puts in ~/.local/bin back to this folder.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+FERRY="$(cd "$(dirname "$SELF")" && pwd)/ztr_ferry.py"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  log_err "python3 not found."
+  exit 1
+fi
+if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
+  log_err "Python's tkinter isn't installed — on Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+  exit 1
+fi
+if ! command -v rsync >/dev/null 2>&1; then
+  log_warn "rsync isn't installed — small files still transfer, folders and larger files need it: sudo apt install rsync"
+fi
+
+# Started from a plain ssh login there's no display; try the desktop's usual one.
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  export DISPLAY=:0
+fi
+
+if [[ "${1:-}" == "--foreground" ]]; then
+  shift
+  exec python3 "$FERRY" "$@"
+fi
+
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/ferry.log"
+mkdir -p "$(dirname "$LOG")"
+setsid -f python3 "$FERRY" "$@" >"$LOG" 2>&1
+
+# A healthy Ferry prints nothing, so anything in the log within the first
+# moments is a startup problem (no display, a missing module, ...).
+sleep 1.5
+if [[ -s "$LOG" ]]; then
+  if grep -q "couldn't connect to display" "$LOG"; then
+    log_err "Ferry couldn't reach a screen (DISPLAY=${DISPLAY:-unset}). Run ztr_ferry from a terminal on your desktop, or set DISPLAY first."
+  else
+    log_err "Ferry didn't start cleanly:"
+    tail -n 12 "$LOG" >&2
+  fi
+  exit 1
+fi
