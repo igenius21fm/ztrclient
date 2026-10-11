@@ -1129,6 +1129,58 @@ def forget_old_host_keys():
             pass
 
 
+# How old a leftover has to be before it can be swept. A connection folder exists while a sign-in is still in
+# progress (up to 90 s), so another running Ferry's folder is never touched; the others are long past their use.
+SWEEP_CONNECTION_AGE = 180        # a connection folder with no live ssh connection behind it
+SWEEP_HELPER_AGE = 600            # a password-helper folder (deleted right after sign-in)
+SWEEP_EDIT_AGE = 24 * 3600        # a "View / Edit" copy of a server file (Ferry watches these for an hour)
+
+
+def _socket_alive(path):
+    """True if something is listening on the unix socket at `path` (an ssh connection that is still up)."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        sock.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def sweep_stale_temp(now=None, base=None):
+    """Removes what a crashed or killed Ferry left in the temp folder: connection folders (they hold a host-key file),
+    password-helper folders and old "View / Edit" copies. Only folders this user owns that are older than the limits
+    above, and a connection folder is kept while its ssh connection is still alive. Returns how many were removed."""
+    now = time.time() if now is None else now
+    base = Path(base or tempfile.gettempdir())
+    removed = 0
+    try:
+        entries = list(base.glob("ferry-*"))
+    except OSError:
+        return 0
+    for path in entries:
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                continue  # a file, a symlink, or somebody else's — not ours to touch
+            age = now - st.st_mtime
+            name = path.name
+            if name.startswith("ferry-ask-"):
+                stale = age > SWEEP_HELPER_AGE
+            elif name.startswith("ferry-edit-"):
+                stale = age > SWEEP_EDIT_AGE
+            else:  # ferry-<random>: one connection
+                stale = age > SWEEP_CONNECTION_AGE and not _socket_alive(str(path / "m"))
+            if stale:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += not path.exists()
+        except OSError:
+            continue
+    return removed
+
+
 def migrate_old_config():
     """Carries saved sites, bookmarks and settings over from the folder an earlier version used (never host keys)."""
     try:
@@ -3323,6 +3375,7 @@ def build_app():
             self.root = root
             migrate_old_config()
             forget_old_host_keys()
+            sweep_stale_temp()
             self.settings = load_settings()
             self.sites = load_sites()
             self.workspaces = []

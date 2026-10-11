@@ -329,6 +329,11 @@ or written to disk.
   deleted with the connection; nothing about the servers you visit is kept on
   disk. A changed key between sessions is therefore not detected — the same
   trade-off `ztr_ssh` makes.
+- **Tidying up.** Each connection's temporary folder is deleted when the
+  connection closes. If Ferry is killed or crashes, the next Ferry to start
+  clears what it left behind (connection folders whose ssh connection is
+  gone, old password-helper folders, and day-old "View / Edit"
+  copies) and never touches another running Ferry's.
 
 **Where things live.** Saved sites, bookmarks and settings are in
 `~/.config/ztr_ferry/` (no passwords). `FERRY_TERMINAL` (for example
