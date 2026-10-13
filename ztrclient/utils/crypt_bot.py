@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import secrets
+import threading
 from typing import Tuple, Union
 
 try:
@@ -14,6 +15,32 @@ from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 from Crypto.Util.Padding import pad, unpad
+
+
+# Parsing a private-key PEM is by far the most expensive thing a CryptBot does -- pycryptodome checks the key's
+# primes as it imports it: ~65ms on a server CPU, ~450ms on a Raspberry Pi 4 -- and every new CryptBot used to
+# do it again for the same file (hops build one per request, the client one per tunnel). A key file does not
+# change, so the parsed key is kept for the life of the process, per (path, modification time, size); replacing
+# the file loads the new one.
+_PRIV_KEY_CACHE = {}
+_PRIV_KEY_CACHE_LOCK = threading.Lock()
+_PRIV_KEY_CACHE_MAX = 32
+
+
+def _load_private_key_cached(path: str) -> RSA.RsaKey:
+    st = os.stat(path)
+    cache_key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    with _PRIV_KEY_CACHE_LOCK:
+        hit = _PRIV_KEY_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+    with open(path, "rb") as f:
+        parsed = RSA.import_key(f.read())
+    with _PRIV_KEY_CACHE_LOCK:
+        if len(_PRIV_KEY_CACHE) >= _PRIV_KEY_CACHE_MAX:
+            _PRIV_KEY_CACHE.clear()
+        _PRIV_KEY_CACHE[cache_key] = parsed
+    return parsed
 
 
 def encrypt_msg(msg: bytes, public_key: RSA.RsaKey) -> Tuple[bytes, bytes, bytes]:
@@ -56,8 +83,7 @@ class CryptBot:
 
     def _load_priv_key(self) -> RSA.RsaKey:
         if self._priv_key is None:
-            with open(self.pathPrivateKey, "rb") as f:
-                self._priv_key = RSA.import_key(f.read())
+            self._priv_key = _load_private_key_cached(self.pathPrivateKey)
         return self._priv_key
 
     def _load_recipient_pub_key(self) -> RSA.RsaKey:
