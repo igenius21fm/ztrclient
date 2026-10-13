@@ -1807,6 +1807,7 @@ def build_app():
             self.inner.bind("<FocusIn>", lambda e: self._focused(True), add="+")
             self.inner.bind("<FocusOut>", lambda e: self._focused(False), add="+")
             self._hint = None
+            self._var = kw.get("textvariable")
             if placeholder:  # dim hint text shown while the field is empty and unfocused
                 self._hint = tk.Label(self, text=placeholder, bg=FIELD, fg=DIM, font=UI.get("body"), bd=0, padx=0, pady=0)
                 self._hint.bind("<Button-1>", lambda e: self.inner.focus_set())
@@ -1819,7 +1820,9 @@ def build_app():
         def _show_hint(self):
             if self._hint is None:
                 return
-            if self.inner.get() or self._focus:
+            # A variable's write callback runs before the entry itself has the new text, so read the variable when there is one.
+            text = self._var.get() if self._var is not None else self.inner.get()
+            if text or self._focus:
                 self._hint.place_forget()
             else:
                 self._hint.place(x=11, rely=0.5, anchor="w")
