@@ -54,6 +54,16 @@ or `installer-macos.sh` with whatever flags you gave it. The two take the same
 flags and ask the same questions; everything below applies to both unless it
 says otherwise.
 
+Prefer a window? `./installer.sh --gui` opens the same installation as a
+short wizard: it checks what this computer has, lets you switch on the
+services, Ferry and ZTR Proxy you want, and shows the installer working. Then
+it looks at your account and sets up whatever is missing: it creates your key
+(and signs the dashboard's nonce, what `launcher.sh` does by hand), adds a
+route file you downloaded, saves your secret key in `.env`, and can open a real
+tunnel to prove it all works. It needs Python's Tk (Linux: `sudo apt install
+python3-tk`; macOS: Tk 8.6 or newer, such as `brew install python-tk@3.13`)
+and takes no other options.
+
 With no flags, it walks you through everything interactively (see
 [Installer prompts](#installer-prompts) below) — no flags are required for a
 normal install. Under the hood, it:
