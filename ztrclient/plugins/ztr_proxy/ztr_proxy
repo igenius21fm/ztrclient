@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# ztr_proxy — opens the ZTR Proxy window: a local proxy for your browser that
+# sends its traffic through a ZTRelay route (see ztr_proxy.py and
+# plugins/README.md).
+#
+#   ztr_proxy                    open the window; the terminal comes straight back
+#   ztr_proxy --foreground       keep it attached to this terminal (shows errors live)
+#   ztr_proxy --route NAME.ztr   open the window with that route chosen (a file in routes/)
+#   ztr_proxy --start            start the proxy as soon as the window opens
+#   ztr_proxy --cli [options]    no window: run the proxy itself in this terminal
+#                                (ztr_proxy --cli --help lists its options)
+#
+# Uses the Python environment the installer set up (it holds the one package
+# the proxy needs, pycryptodome); set ZTR_VENV_DIR if you put it elsewhere.
+# Linux only.
+set -u -o pipefail
+
+if [[ -t 2 ]]; then
+  C_ERR=$'\033[0;31m'; C_WARN=$'\033[0;33m'; C_RESET=$'\033[0m'
+else
+  C_ERR=""; C_WARN=""; C_RESET=""
+fi
+log_err()  { echo "${C_ERR}[ztr_proxy] $*${C_RESET}" >&2; }
+log_warn() { echo "${C_WARN}[ztr_proxy]${C_RESET} $*" >&2; }
+
+# Follow the symlink the installer puts in ~/.local/bin back to this folder.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+
+# The installer's own venv first (it always has pycryptodome); otherwise any
+# python3 that already does.
+PY=""
+VENV_PY="${ZTR_VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}/bin/python3"
+for candidate in "$VENV_PY" "$(command -v python3 2>/dev/null || true)"; do
+  if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" -c 'import Crypto' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+if [[ -z "$PY" ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_err "python3 not found."
+  else
+    log_err "pycryptodome isn't available. Run the ztrclient installer (it sets up the Python environment this needs), or: python3 -m pip install pycryptodome"
+  fi
+  exit 1
+fi
+
+if [[ "${1:-}" == "--cli" ]]; then
+  shift
+  exec "$PY" "$HERE/ztr_proxy.py" "$@"
+fi
+
+if ! "$PY" -c 'import tkinter' >/dev/null 2>&1; then
+  log_err "Python's tkinter isn't installed — the window needs it. On Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+  log_warn "Without a window you can still run the proxy with: ztr_proxy --cli --config-file NAME.ztr"
+  exit 1
+fi
+
+# Started from a plain ssh login there's no display; try the desktop's usual one.
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  export DISPLAY=:0
+fi
+
+if [[ "${1:-}" == "--foreground" ]]; then
+  shift
+  exec "$PY" "$HERE/ztr_proxy_gui.py" "$@"
+fi
+
+LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/proxy.log"
+mkdir -p "$(dirname "$LOG")"
+setsid -f "$PY" "$HERE/ztr_proxy_gui.py" "$@" >"$LOG" 2>&1
+
+# A healthy window prints nothing, so anything in the log within the first
+# moments is a startup problem (no display, a missing module, ...).
+sleep 1.5
+if [[ -s "$LOG" ]]; then
+  if grep -q "couldn't connect to display" "$LOG"; then
+    log_err "The window couldn't reach a screen (DISPLAY=${DISPLAY:-unset}). Run ztr_proxy from a terminal on your desktop, or set DISPLAY first."
+  else
+    log_err "ZTR Proxy didn't start cleanly:"
+    tail -n 12 "$LOG" >&2
+  fi
+  exit 1
+fi

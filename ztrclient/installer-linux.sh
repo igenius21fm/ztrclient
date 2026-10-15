@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Linux installer for the ZTRelay plugin wrappers (ztr_ssh, ztr_forward,
-# ztr_pg, and ztr_ferry — the launcher for the Ferry file manager) so they
+# ztr_pg, ztr_ferry — the launcher for the Ferry file manager — and ztr_proxy,
+# the launcher for the browser-proxy window) so they
 # run from anywhere, without a manual shell alias per
 # docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
 # ztrClient.py itself — this is scoped to plugins/ only (which is also
@@ -14,20 +15,22 @@
 #   ./installer-linux.sh --with-dashboard      also set up ztr_dashboard.py as a systemd --user service
 #   ./installer-linux.sh --with-requests       also set up ztr_requests (request-composer web UI) as a systemd --user service
 #   ./installer-linux.sh --with-ferry          also add Ferry (the file manager) to your applications menu, and check what it needs
+#   ./installer-linux.sh --with-proxy          also add ZTR Proxy (the browser-proxy window) to your applications menu, and check what it needs
 #   ./installer-linux.sh --with-local-ip       also set up a dedicated dummy interface for tunneled sessions
 #   ./installer-linux.sh --local-ip IP         use IP instead of the default 10.10.15.10
 #   ./installer-linux.sh --uninstall           remove the installed wrappers (services, venv, and dummy interface, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up each service, whether to add Ferry to your applications menu, and (if
+# up each service, whether to add Ferry and ZTR Proxy to your applications
+# menu, and (if
 # any of the three services, or if --with-local-ip was passed) what IP to
 # use. --with-service/--with-dashboard/--with-requests/--with-ferry/
-# --with-local-ip/--local-ip above are for skipping those prompts —
+# --with-proxy/--with-local-ip/--local-ip above are for skipping those prompts —
 # non-interactive runs (CI, provisioning scripts, piped input) skip them
 # automatically and just take the flags/defaults given.
 #
 # What it actually does:
-#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry} executable — a zip
+#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy} executable — a zip
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
 #   2. Checks that python3 exists, then creates a dedicated venv for ztr
@@ -42,7 +45,7 @@
 #      live traffic panel. With --with-requests, also installs Pillow —
 #      ztr_requests/server.py needs it to sniff/decode image responses.
 #   3. Symlinks the wrappers into --prefix (default ~/.local/bin), so
-#      `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry` work from any shell, not just
+#      `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: creates ztr_i0, a real dummy interface (`ip
 #      link add ztr_i0 type dummy`), and binds --local-ip (default
@@ -74,11 +77,26 @@
 #      menu (a .desktop launcher plus its icon under ~/.local/share), so it
 #      opens like any other app. Ferry itself needs no pip packages, so it
 #      doesn't use the venv. `ztr_ferry` from a terminal works either way.
+#   9. With --with-proxy: checks what the ZTR Proxy window
+#      (plugins/ztr_proxy/) needs — Python's tkinter for its window and
+#      pycryptodome, which the venv above already has — and tells you the apt
+#      package for anything missing. Then adds ZTR Proxy to your applications
+#      menu the same way as Ferry. `ztr_proxy` opens the window from a
+#      terminal either way, and `ztr_proxy --cli` runs the proxy without one.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$SCRIPT_DIR/plugins"
-WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry)
+WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy)
+
+# Where a wrapper's launcher script lives. Most sit directly in plugins/;
+# ZTR Proxy keeps all of its files in its own folder.
+wrapper_path() {
+  case "$1" in
+    ztr_proxy) echo "$PLUGINS_DIR/ztr_proxy/ztr_proxy" ;;
+    *) echo "$PLUGINS_DIR/$1" ;;
+  esac
+}
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 VENV_DIR="${VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}"
@@ -92,6 +110,8 @@ WITH_REQUESTS=0
 WITH_REQUESTS_SET_BY_USER=0
 WITH_FERRY=0
 WITH_FERRY_SET_BY_USER=0
+WITH_PROXY=0
+WITH_PROXY_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 
@@ -107,7 +127,7 @@ log_warn() { echo "${C_WARN}[installer]${C_RESET} $*"; }
 log_err()  { echo "${C_ERR}[installer] $*${C_RESET}" >&2; }
 
 usage() {
-  sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,85p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -138,6 +158,11 @@ while [[ $# -gt 0 ]]; do
     --with-ferry)
       WITH_FERRY=1
       WITH_FERRY_SET_BY_USER=1
+      shift
+      ;;
+    --with-proxy)
+      WITH_PROXY=1
+      WITH_PROXY_SET_BY_USER=1
       shift
       ;;
     --with-local-ip)
@@ -173,6 +198,8 @@ DUMMY_IF_UNIT="/etc/systemd/system/ztr-dummy-if.service"
 XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 FERRY_DESKTOP="$XDG_DATA/applications/ztr-ferry.desktop"
 FERRY_ICON="$XDG_DATA/icons/hicolor/128x128/apps/ztr-ferry.png"
+PROXY_DESKTOP="$XDG_DATA/applications/ztr-proxy.desktop"
+PROXY_ICON="$XDG_DATA/icons/hicolor/128x128/apps/ztr-proxy.png"
 
 # Ask up front rather than requiring you to already know the flag exists —
 # only when you didn't already say one way or the other with --with-service,
@@ -211,6 +238,14 @@ if [[ "$WITH_FERRY_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Add Ferry (the file manager) to your applications menu? [y/N]: " WITH_FERRY_ANSWER
   case "$WITH_FERRY_ANSWER" in
     [yY]*) WITH_FERRY=1 ;;
+  esac
+fi
+
+# Same for ZTR Proxy: a window, so only worth offering on a machine with a screen.
+if [[ "$WITH_PROXY_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Add ZTR Proxy (the browser-proxy window) to your applications menu? [y/N]: " WITH_PROXY_ANSWER
+  case "$WITH_PROXY_ANSWER" in
+    [yY]*) WITH_PROXY=1 ;;
   esac
 fi
 
@@ -272,7 +307,7 @@ uninstall() {
     local link="$PREFIX/$name"
     # Only remove it if it's actually our symlink — never clobber some
     # unrelated file that happens to share the name.
-    if [[ -L "$link" ]] && [[ "$(readlink "$link")" == "$PLUGINS_DIR/$name" ]]; then
+    if [[ -L "$link" ]] && [[ "$(readlink "$link")" == "$(wrapper_path "$name")" ]]; then
       rm -f "$link"
       removed=1
     fi
@@ -284,6 +319,13 @@ uninstall() {
     rm -f "$FERRY_DESKTOP" "$FERRY_ICON"
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$FERRY_DESKTOP")" >/dev/null 2>&1 || true
     log_ok "Ferry launcher removed."
+  fi
+
+  if [[ -f "$PROXY_DESKTOP" ]] && grep -q "ztrclient installer" "$PROXY_DESKTOP" 2>/dev/null; then
+    log_info "removing ZTR Proxy from your applications menu ..."
+    rm -f "$PROXY_DESKTOP" "$PROXY_ICON"
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$PROXY_DESKTOP")" >/dev/null 2>&1 || true
+    log_ok "ZTR Proxy launcher removed."
   fi
 
   if [[ -f "$SERVICE_UNIT" ]]; then
@@ -325,7 +367,7 @@ uninstall() {
     tmp_rc="$(mktemp)"
     grep -vxF "$path_line" "$rc_file" > "$tmp_rc"
     for name in "${WRAPPERS[@]}"; do
-      local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
+      local alias_line="alias $name=\"$(wrapper_path "$name")\"  # added by ztrclient installer"
       grep -vxF "$alias_line" "$tmp_rc" > "$tmp_rc.next" && mv "$tmp_rc.next" "$tmp_rc"
     done
     local venv_alias_line="alias ztr_venv=\"source $VENV_DIR/bin/activate\"  # added by ztrclient installer"
@@ -470,16 +512,16 @@ log_info "installing wrappers into $PREFIX ..."
 mkdir -p "$PREFIX"
 
 for name in "${WRAPPERS[@]}"; do
-  chmod +x "$PLUGINS_DIR/$name"
+  chmod +x "$(wrapper_path "$name")"
   target="$PREFIX/$name"
   # Only overwrite what's already ours (a symlink to this plugins dir, or
   # nothing at all) — never clobber some unrelated file that happens to
   # share the name.
-  if [[ -e "$target" || -L "$target" ]] && [[ "$(readlink "$target" 2>/dev/null)" != "$PLUGINS_DIR/$name" ]]; then
+  if [[ -e "$target" || -L "$target" ]] && [[ "$(readlink "$target" 2>/dev/null)" != "$(wrapper_path "$name")" ]]; then
     log_warn "$target already exists and isn't one of ours — skipping (remove it yourself and re-run to install here)."
     continue
   fi
-  ln -sf "$PLUGINS_DIR/$name" "$target"
+  ln -sf "$(wrapper_path "$name")" "$target"
   log_ok "$name -> $target"
 done
 
@@ -528,7 +570,7 @@ else
         { echo ""; echo "$PATH_LINE"; } >> "$RC_FILE"
       fi
       for name in "${WRAPPERS[@]}"; do
-        alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
+        alias_line="alias $name=\"$(wrapper_path "$name")\"  # added by ztrclient installer"
         if ! grep -qxF "$alias_line" "$RC_FILE" 2>/dev/null; then
           echo "$alias_line" >> "$RC_FILE"
         fi
@@ -543,7 +585,7 @@ else
     if [[ "$NEED_PATH" -eq 1 ]]; then
       echo "${C_DIM}    $PATH_LINE${C_RESET}"
       for name in "${WRAPPERS[@]}"; do
-        echo "${C_DIM}    alias $name=\"$PLUGINS_DIR/$name\"${C_RESET}"
+        echo "${C_DIM}    alias $name=\"$(wrapper_path "$name")\"${C_RESET}"
       done
     fi
     [[ "$NEED_VENV_ALIAS" -eq 1 ]] && echo "${C_DIM}    $VENV_ALIAS_LINE${C_RESET}"
@@ -599,6 +641,44 @@ EOF
     log_ok "Ferry added to your applications menu ($FERRY_DESKTOP)."
   else
     log_warn "couldn't write Ferry's icon — skipping the applications-menu entry (ztr_ferry still works from a terminal)."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# ZTR Proxy: check what its window needs, then give it a place in the
+# applications menu. pycryptodome is already in the venv from above; tkinter
+# comes from the system's package manager, so a missing one just gets named
+# with its apt package.
+if [[ "$WITH_PROXY" -eq 1 ]]; then
+  log_info "setting up ZTR Proxy (the browser-proxy window) ..."
+
+  if "$VENV_PY" -c 'import tkinter' >/dev/null 2>&1; then
+    log_ok "tkinter found — ZTR Proxy's window will work."
+  else
+    log_warn "Python's tkinter isn't installed — the ZTR Proxy window needs it. On Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+    log_warn "(the proxy itself still runs without a window: ztr_proxy --cli --config-file NAME.ztr)"
+  fi
+  command -v setsid >/dev/null 2>&1 || log_warn "setsid not found (util-linux) — 'ztr_proxy' needs it to open the window without tying up the terminal."
+
+  if "$VENV_PY" "$PLUGINS_DIR/ztr_proxy/ztr_proxy_gui.py" --write-icon "$PROXY_ICON"; then
+    mkdir -p "$(dirname "$PROXY_DESKTOP")"
+    cat > "$PROXY_DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=ZTR Proxy
+GenericName=Browser proxy for ZTRelay
+Comment=Send your browser's traffic through a ZTRelay route
+Exec="$PLUGINS_DIR/ztr_proxy/ztr_proxy"
+Icon=$PROXY_ICON
+Terminal=false
+Categories=Network;
+Keywords=ztr;ztrelay;proxy;socks;browser;privacy;
+# written by the ztrclient installer (--uninstall removes it)
+EOF
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(dirname "$PROXY_DESKTOP")" >/dev/null 2>&1 || true
+    log_ok "ZTR Proxy added to your applications menu ($PROXY_DESKTOP)."
+  else
+    log_warn "couldn't write ZTR Proxy's icon — skipping the applications-menu entry (ztr_proxy still works from a terminal)."
   fi
 fi
 
@@ -823,4 +903,7 @@ echo
 log_ok "done. Try: ztr_ssh --rh \"example._ztr\" --rp 22"
 if [[ "$WITH_FERRY" -eq 1 ]]; then
   log_ok "and for the file manager: ztr_ferry   (or find Ferry in your applications menu)"
+fi
+if [[ "$WITH_PROXY" -eq 1 ]]; then
+  log_ok "and for the browser proxy: ztr_proxy   (or find ZTR Proxy in your applications menu)"
 fi

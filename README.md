@@ -5,7 +5,8 @@ through the ZTRelay network. Turns a `.ztr` route config (downloaded from
 your dashboard) into a live connection, and ships with three ready-to-use
 plugin wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`) so you don't have to
 write any code to use it — plus Ferry, a file manager for your servers
-(see [Ferry](#ferry--a-file-manager)).
+(see [Ferry](#ferry--a-file-manager)), and ZTR Proxy, which sends your
+browser's traffic through a route (see [ZTR Proxy](#ztr-proxy--your-browser-through-a-route)).
 
 Full API reference and walkthroughs: see the ztrClient.py docs on the
 ZTRelay platform (Downloads page → "Read the docs").
@@ -16,6 +17,7 @@ ZTRelay platform (Downloads page → "Read the docs").
 - **Linux** (systemd) or **macOS** (launchd) — each has its own installer: `installer-linux.sh` and `installer-macos.sh`.
 - No manual `pip install` — the installer sets up its own isolated venv.
 - For Ferry (optional, Linux desktop only): Python's `tkinter`, `rsync` and `ssh`.
+- For the ZTR Proxy window (optional, Linux desktop only): Python's `tkinter`. The proxy itself, started with `ztr_proxy --cli`, needs nothing extra.
 
 ## Install
 
@@ -89,6 +91,7 @@ installs, where the interactive prompts are skipped automatically anyway
 | `--with-dashboard` | Set up the dashboard service non-interactively. |
 | `--with-requests` | Set up the request-composer service non-interactively. |
 | `--with-ferry` | Add Ferry to your applications menu and check what it needs (Linux only). |
+| `--with-proxy` | Add ZTR Proxy to your applications menu and check what it needs (Linux only). |
 | `--with-local-ip` | Set up the dedicated IP non-interactively (a dummy interface on Linux, a `lo0` alias on macOS). |
 | `--local-ip IP` | Use `IP` instead of the default `10.10.15.10`. |
 | `--uninstall` | Remove everything the installer set up — wrappers, venv, every service, PATH/alias lines, and the dedicated IP. |
@@ -162,6 +165,12 @@ icon for Ferry under `~/.local/share`, and checks that Python's `tkinter`,
 `rsync` and `ssh` are there — anything missing is named with the `apt`
 package that provides it. `ztr_ferry` works from any terminal whichever way
 you answer.
+
+**7. `Add ZTR Proxy (the browser-proxy window) to your applications menu? [y/N]:`**
+(Linux only; asked right after the Ferry question.) Adds a launcher and icon
+for ZTR Proxy under `~/.local/share` and checks that Python's `tkinter` is
+there, naming the `apt` package if it isn't. `ztr_proxy` works from any
+terminal whichever way you answer.
 
 ## Getting connected
 
@@ -289,6 +298,35 @@ service as `ztr_ssh`. Linux desktop only for now (`installer-macos.sh` does
 not install it). See [plugins/README.md](ztrclient/plugins/README.md#ztr_ferrypy--ferry-a-file-manager)
 for how it works and what it can do.
 
+## ZTR Proxy — your browser through a route
+
+`ztr_proxy` opens a window that runs a local proxy and sends whatever uses it
+through one of your routes. Pick a route, press **Start proxy**, then open a
+browser from the **Browser** page — Firefox, Chromium, Chrome, Brave, Edge or
+Vivaldi, whichever is installed. It starts in a profile of its own with the
+proxy already set, so your normal profile is left alone. The same port speaks
+both an HTTP proxy and SOCKS5, so curl, `ssh` and any other proxy-aware
+program can use it too (the **Browser** page shows the address).
+
+The window also shows every connection as it opens, how long each tunnel took
+to set up, which hosts you use most, and what each hop of the route costs you
+in time. A **Blocklist** refuses hosts before anything leaves your computer,
+and an **Alert list** and a set of detection rules flag behaviour that looks
+suspicious, such as connections at machine-regular intervals or far more data
+going out than coming in. Everything stays on your computer.
+
+```bash
+ztr_proxy                    # open the window; the terminal comes straight back
+ztr_proxy --route NAME.ztr   # open it with a route from routes/ already chosen
+ztr_proxy --start            # start the proxy as soon as the window opens
+ztr_proxy --cli --config-file NAME.ztr   # no window: run the proxy in this terminal
+```
+
+HTTPS passes through untouched — the proxy never sees inside it. See
+[plugins/README.md](ztrclient/plugins/README.md#ztr_proxy--the-browser-proxy)
+for every option and where its settings are kept. Linux desktop only for now
+(`installer-macos.sh` does not install it).
+
 ## Troubleshooting
 
 ### Installing
@@ -379,6 +417,9 @@ traceback.
 
 ## macOS notes
 
+- **ZTR Proxy.** The proxy window is Linux-only for now, so the macOS
+  installer doesn't install `ztr_proxy` or take `--with-proxy`.
+
 - **Ferry.** The file manager is Linux-only for now, so the macOS installer
   doesn't install `ztr_ferry` or take `--with-ferry`.
 
@@ -399,7 +440,7 @@ traceback.
 ./installer-linux.sh --uninstall   # or ./installer-macos.sh --uninstall
 ```
 
-Removes the symlinked wrappers, Ferry's menu launcher and icon, the venv, whichever background services were
+Removes the symlinked wrappers, the menu launchers and icons for Ferry and ZTR Proxy, the venv, whichever background services were
 set up (the tunnel service, the dashboard, the request composer, or any
 combination), the PATH/alias lines from your rc file, and the dedicated IP
 (if any) — everything the
@@ -417,7 +458,8 @@ configs in it are left alone.
   runs `launcher.py` through it — the one thing you need before a
   `route.ztr` exists at all, so it works standalone, without the installer.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry` (the Ferry
-  file manager's launcher, with `ztr_ferry.py` behind it), `ztr_tunnel_lp.py`
+  file manager's launcher, with `ztr_ferry.py` behind it), `ztr_proxy/` (the
+  browser proxy and its window, launched with `ztr_proxy`), `ztr_tunnel_lp.py`
   (the persistent tunnel service target), and `ztr_dashboard.py` (the local
   tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
   build step). See [plugins/README.md](ztrclient/plugins/README.md) for what each one

@@ -341,11 +341,77 @@ or written to disk.
 points it at a different `ztr_ssh`, and `ZTR_FERRY_HOME` moves the settings
 folder.
 
+## ztr_proxy/ — the browser proxy
+
+A local proxy that sends the traffic of anything pointed at it through one of
+your routes, with a window to run and watch it. One port speaks both an HTTP
+proxy and SOCKS5. It does not use the tunnel service the other wrappers rely
+on: it authorizes its own tunnels from a route file in `routes/`.
+
+```bash
+ztr_proxy                    # opens the window; the terminal comes straight back
+ztr_proxy --foreground       # stay attached to the terminal and show errors live
+ztr_proxy --route NAME.ztr   # open it with that route (a file in routes/) chosen
+ztr_proxy --start            # start the proxy as soon as the window opens
+ztr_proxy --cli --config-file NAME.ztr   # no window: run the proxy in this terminal
+```
+
+With `--with-proxy` the installer also adds ZTR Proxy to your applications
+menu. The window runs on a Linux desktop and needs Python's tkinter (`sudo apt
+install python3-tk`); `ztr_proxy --cli` needs nothing beyond what the rest of
+the client already uses. The launcher uses the installer's Python environment,
+or any `python3` that has `pycryptodome`; set `ZTR_VENV_DIR` if you put that
+environment somewhere else.
+
+By default it listens on `10.10.15.10` when this computer has that address
+(the one `--with-local-ip` sets up) and on `127.0.0.1` otherwise, port `8095`.
+The address in use is shown in the window and printed by `ztr_proxy --cli`.
+Use `socks5h://` (curl: `--socks5-hostname`) so the proxy looks names up for
+you instead of your computer.
+
+**What passes through.** Plain HTTP is fully proxied: redirects reach the
+client instead of being followed, and cookies pass straight through and are
+never kept. HTTPS (`CONNECT`) and SOCKS5 are a blind byte relay — the TLS
+session runs between your program and the site, and the proxy never sees
+inside it.
+
+**The window.**
+
+- **Overview, Connections and Hosts** show each connection as it opens and
+  closes, how long its tunnel took, the bytes each way, and the hosts you use
+  most. A host can be kept ready ("Keep ready") so its first connection
+  starts at once, and a route card shows each hop's direct round-trip time.
+- **Browser** gives the proxy address (with copy buttons), a connection test,
+  and "Open *browser* through ZTR". It lists the browsers it finds — Firefox,
+  Chromium, Chrome, Brave, Edge and Vivaldi, including Snap and Flatpak
+  installs — and opens the one you pick in a separate profile with the proxy
+  set. Two options apply to the browser it opens: quieting the browser's own
+  background connections (updates, telemetry and sync checks each open a
+  tunnel of their own), and blocking WebRTC, which can reveal your real
+  address to a website. For Firefox the page can also add the proxy settings
+  to a profile you already use, and remove them again.
+- **Blocklist and Alerts.** A blocked host is refused before any tunnel is
+  opened. Patterns are `example.com` (that name and everything under it),
+  `example.com:8443`, an address, or a CIDR range; lists in hosts-file or
+  adblock format can be imported. The alert list names hosts you want to hear
+  about without blocking them. Detection rules flag regular beaconing, far
+  more data sent than received, bursts of random-looking names, remote-access
+  ports, direct-to-address connections and repeated failures; every alert
+  shows the evidence behind it, and a host you recognise can be marked
+  trusted.
+
+**Where things live.** Settings, the blocklist and the alerts are in
+`~/.config/ztr_proxy/` (`ZTR_PROXY_HOME` moves them). The window's log is at
+`~/.local/state/ztr/proxy.log` while it runs from the launcher.
+
 ## Layout
 
 - `ztr_tunnel_lp.py` — the shared tunnel service every wrapper below talks to.
 - `ztr_ssh`, `ztr_forward`, `ztr_pg` — CLI wrappers around it.
 - `ztr_ferry` + `ztr_ferry.py` — the Ferry file manager and its launcher.
+- `ztr_proxy/` — the browser proxy: `ztr_proxy` (launcher), `ztr_proxy.py`
+  (the proxy), `ztr_proxy_gui.py` (the window) and `ztr_proxy_guard.py`
+  (blocklist, alert list and detection rules).
 - `ztr_dashboard.py` + `static/` — the standalone local dashboard.
 - `ztr_https.py` — HTTP(S)-over-tunnel client library.
 - `ztr_requests/` — the standalone request-composer web UI, built on it.
