@@ -19,7 +19,7 @@ but worth knowing what's actually in it:
 | Field | What it's for |
 |---|---|
 | `identifier` | Your account's registry-facing client id. `ztrClient.py` sends this to hops as `client_id` — it's not your dashboard username. |
-| `secret_key` | Ships as the literal placeholder `<your secret_key>` — **replace it with your real one** before running the client, or the tunnel will fail to authorize with no Python exception (check `ztrclient.log`). The server only ever stores a hash of it, so it can't fill this in for you. Shown once — at registration, or after **Account → Regenerate secret key**. |
+| `secret_key` | Ships as the literal placeholder `<your secret_key>` — the server only ever stores a hash of your real key, so it can't fill it in. Leave the placeholder and put your real key (64 hex characters, shown once at registration or after **Account → Regenerate secret key**) in a `.env` file next to `ztrClient.py` as `secret_key=...`; the client reads it from there whenever this field isn't a real key, and the same line serves every route. Without either, the client stops with an error that says so. A wrong but well-formed key makes the tunnel fail to authorize with no Python exception (check `ztrclient.log`). |
 | `route_id` | Identifies this specific route. Fixed once downloaded — a new route means a new config file, not an edit to this one. |
 | `chain` | Every hop in order — entry, then each middle, then exit. Each entry has `address` (a real address for entry/exit, a `._ztr` alias for middle hops, since the client never learns a middle hop's real IP), `pubkey`, and `status`. |
 | `status` / `status_reason` | A snapshot of the route's health at the moment you downloaded this file — not live. Re-download from the dashboard to refresh it. |

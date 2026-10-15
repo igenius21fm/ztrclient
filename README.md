@@ -217,11 +217,21 @@ step 1 rather than creating its own.
 mv ~/Downloads/<name>.ztr ztrclient/routes/
 ```
 
-Open it and replace the `"secret_key": "<your secret_key>"` placeholder
-with your real account secret key (the same one used in step 1 — shown
-once at account registration, or after **Account → Regenerate secret
-key**) — the server only ever stores a hash of it, so it can't fill this
-in for you.
+The file ships with a `"secret_key": "<your secret_key>"` placeholder, and
+the server can't fill your real one in (it only ever stores a hash of it).
+Put your account secret key (the same one used in step 1 — 64 hex
+characters, shown once at account registration, or after **Account →
+Regenerate secret key**) in a file named `.env` next to `ztrClient.py`, once,
+for every route:
+
+```bash
+echo 'secret_key=<your 64-character key>' > ztrclient/.env
+chmod 600 ztrclient/.env
+```
+
+The client uses the key in the `.ztr` file when it's a real one and the one in
+`.env` otherwise, so downloaded routes work as they are. (You can still paste
+the key into a `.ztr` file instead.) `.env` is already ignored by git.
 → Stuck here? See [The config file](#the-config-file).
 
 **5. Run it.** Easiest: use one of the plugin wrappers directly — after
@@ -414,13 +424,17 @@ in routes/ next to ztrClient.py`** — the file has to be inside `ztrclient`'s
 own `routes/` folder specifically, not your current directory, not
 `~/Downloads`, and not `ztrclient`'s own top-level folder either.
 
-**Connects, but nothing happens / hangs / fails silently** — the single
-most common cause is forgetting to replace the `"secret_key": "<your
-secret_key>"` placeholder in the downloaded file with your real one. This
-doesn't raise a Python exception — bad tunnel authorization is caught
-internally and logged, not raised, so check `ztrclient.log` (next to
-`ztrClient.py`) for what actually went wrong instead of expecting a
-traceback.
+**`no secret_key: this .ztr config still has the placeholder`** — neither the
+downloaded file nor a `.env` next to `ztrClient.py` has your real secret key.
+Add `secret_key=<your 64-character key>` to that `.env` (see
+[Getting connected](#getting-connected)). If it says the `.env` key "isn't a
+real one", it must be exactly the 64 hex characters shown at registration.
+
+**Connects, but nothing happens / hangs / fails silently** — a wrong (but
+well-formed) secret key is the most common cause. Bad tunnel authorization is
+caught internally and logged, not raised as a Python exception, so check
+`ztrclient.log` (next to `ztrClient.py`) for what actually went wrong
+instead of expecting a traceback.
 
 ## macOS notes
 

@@ -8,6 +8,7 @@ import json
 import random
 import string
 import os
+import re
 import struct
 import base64
 from pathlib import Path
@@ -17,6 +18,16 @@ import threading
 
 def sha256(msg: str):
     return hashlib.sha256(msg.encode()).hexdigest()
+
+
+# An account's secret key is 64 hex characters (what registration and "Regenerate
+# secret key" show once). Anything else in a .ztr file — the shipped
+# "<your secret_key>" placeholder above all — is not a key.
+_SECRET_KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def is_secret_key(value) -> bool:
+    return isinstance(value, str) and _SECRET_KEY_RE.match(value.strip()) is not None
 
 
 def write_file_atomically(path: str, content: str) -> None:
@@ -112,6 +123,7 @@ class RelayConfig:
     def __init__(self, config_file = None):
         self.SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
         self.config_path = f"{self.SCRIPT_DIR}/routes/{config_file}"
+        self._secret_key = None  # resolved on first use, see secret_key below
         self.config = self._load_config()
         self.PUB_PATH = f"{self.SCRIPT_DIR}/{self.settings("pub_path_dir")}"
         self.LOG_PATH = f"{self.SCRIPT_DIR}/logs"
@@ -207,12 +219,67 @@ class RelayConfig:
         except KeyError as e:
             raise ConfigFieldError("missing 'route_id' in this .ztr config") from e
 
+    def _secret_key_from_env_file(self):
+        """The secret_key set in the .env file next to ztrClient.py (a line like
+        `secret_key=...`, quotes optional, `#` comments allowed); None if there is no
+        such file or line. The last assignment wins."""
+        try:
+            with open(os.path.join(self.SCRIPT_DIR, ".env"), "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return None
+        found = None
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            name, sep, value = line.partition("=")
+            if not sep or name.strip().lower() != "secret_key":
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            else:
+                value = value.split(" #", 1)[0].strip()
+            found = value.strip()
+        return found
+
     @property
     def secret_key(self):
-        try:
-            return self.config["secret_key"]
-        except KeyError as e:
-            raise ConfigFieldError("missing 'secret_key' in this .ztr config") from e
+        """The account's secret key: the .ztr file's own secret_key when it is a real one, otherwise
+        the secret_key in the .env file next to ztrClient.py — so the placeholder a downloaded
+        .ztr ships with never has to be edited, and one key serves every route."""
+        if self._secret_key is not None:
+            return self._secret_key
+        configured = self.config.get("secret_key")
+        if is_secret_key(configured):
+            self._secret_key = configured.strip()
+            return self._secret_key
+        from_env = self._secret_key_from_env_file()
+        if is_secret_key(from_env):
+            self._secret_key = from_env.strip()
+            return self._secret_key
+        env_path = os.path.join(self.SCRIPT_DIR, ".env")
+        if from_env:
+            raise ConfigFieldError(
+                f"the secret_key in {env_path} isn't a real one — it must be the 64 hex characters shown at "
+                "registration, or after Account → Regenerate secret key"
+            )
+        is_placeholder = (
+            not isinstance(configured, str) or not configured.strip()
+            or (configured.strip().startswith("<") and configured.strip().endswith(">"))
+        )
+        if is_placeholder:
+            raise ConfigFieldError(
+                f"no secret_key: this .ztr config still has the placeholder. Put your real one in {env_path} "
+                "as a line `secret_key=...` (64 hex characters, shown at registration or after "
+                "Account → Regenerate secret key) — or paste it into the .ztr file's secret_key"
+            )
+        # Not the usual shape and not a placeholder: leave it to the hop to judge, as before.
+        self._secret_key = configured
+        return self._secret_key
 
     @property
     def client_id(self):
