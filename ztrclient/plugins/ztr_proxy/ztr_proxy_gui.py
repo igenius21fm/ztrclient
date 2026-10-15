@@ -15,7 +15,7 @@ or add the proxy settings to a Firefox profile you pick — and take them out
 again.
 
 Needs only Python's standard library (tkinter included) plus what ztr_proxy.py
-needs. Linux only.
+needs. Runs on Linux and macOS (on a Mac it needs a Python with Tk 8.6).
 """
 import base64
 import json
@@ -176,9 +176,22 @@ def percentile(values, q):
     return ordered[min(len(ordered) - 1, int(len(ordered) * q))]
 
 
+# The modifier a shortcut uses: Command on a Mac, Control elsewhere.
+MOD = "Command" if sys.platform == "darwin" else "Control"
+
+
+def bind_context_menu(widget, handler):
+    """Right-click opens the menu — on a Mac that is also a two-finger click (Button-2) or Control-click."""
+    widget.bind("<Button-3>", handler)
+    if sys.platform == "darwin":
+        widget.bind("<Button-2>", handler)
+        widget.bind("<Control-Button-1>", handler)
+
+
 # ── Firefox ──────────────────────────────────────────────────────────────────
 
 FIREFOX_ROOTS = [Path.home() / ".config" / "mozilla" / "firefox", Path.home() / ".mozilla" / "firefox",
+                 Path.home() / "Library" / "Application Support" / "Firefox",
                  Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
                  Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox"]
 BLOCK_BEGIN = "// >>> ZTR Proxy (managed by the ZTR Proxy window; remove it there) >>>"
@@ -321,6 +334,26 @@ CHROMIUM_QUIET_FLAGS = ["--disable-background-networking", "--disable-component-
 CHROMIUM_WEBRTC_FLAG = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
 
 
+# Where a Mac keeps each browser: the app's folder name and the program inside it.
+MAC_APPS = {
+    "firefox": ("Firefox.app", "firefox"), "chromium": ("Chromium.app", "Chromium"),
+    "chrome": ("Google Chrome.app", "Google Chrome"), "brave": ("Brave Browser.app", "Brave Browser"),
+    "edge": ("Microsoft Edge.app", "Microsoft Edge"), "vivaldi": ("Vivaldi.app", "Vivaldi"),
+}
+
+
+def _mac_app_program(key):
+    """The program inside this browser's app, from /Applications or ~/Applications; None if it isn't installed."""
+    app, program = MAC_APPS.get(key, (None, None))
+    if not app:
+        return None
+    for root in (Path("/Applications"), Path.home() / "Applications"):
+        path = root / app / "Contents" / "MacOS" / program
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
 def _is_snap_launcher(path):
     """True for the snap binary and for the small stub scripts distributions leave at /usr/bin that just start the snap."""
     real = os.path.realpath(path)
@@ -353,13 +386,17 @@ def detect_browsers():
     found, flatpaks = [], None
     for key, name, kind, commands, snap_name, flatpak_id in BROWSER_CATALOG:
         entry = None
-        for cmd in commands:
+        if sys.platform == "darwin":
+            program = _mac_app_program(key)
+            if program:
+                entry = {"argv": [program], "package": None}
+        for cmd in commands if entry is None else ():
             path = shutil.which(cmd)
             if path:
                 package = "snap" if _is_snap_launcher(path) else None
                 entry = {"argv": [path], "package": package}
                 break
-        if entry is None:
+        if entry is None and sys.platform != "darwin":
             if flatpaks is None:
                 flatpaks = _flatpak_apps()
             if flatpak_id in flatpaks:
@@ -1399,10 +1436,10 @@ def build_app():
             self._build()
             self.show("overview")
             root.protocol("WM_DELETE_WINDOW", self.on_close)
-            root.bind("<Control-r>", lambda e: self.toggle())
-            root.bind("<Control-comma>", lambda e: self.open_settings())
+            root.bind(f"<{MOD}-r>", lambda e: self.toggle())
+            root.bind(f"<{MOD}-comma>", lambda e: self.open_settings())
             for i, (key, _t) in enumerate(self.PAGES):
-                root.bind(f"<Control-Key-{i + 1}>", lambda e, k=key: self.show(k))
+                root.bind(f"<{MOD}-Key-{i + 1}>", lambda e, k=key: self.show(k))
             self.refresh_route_card(probe=True)
             self.root.after(400, self._tick)
             self.root.after(90, self._animate)
@@ -1648,7 +1685,7 @@ def build_app():
             self.conn_menu.add_command(label="Alert on this host", command=self.watch_from_connection)
             self.conn_menu.add_separator()
             self.conn_menu.add_command(label="Close connection", command=self.close_selected)
-            self.conn_tree.bind("<Button-3>", lambda e: self.popup(self.conn_tree, self.conn_menu, e))
+            bind_context_menu(self.conn_tree, lambda e: self.popup(self.conn_tree, self.conn_menu, e))
             self.detail = Card(f, radius=12, pad=(14, 10))
             self.detail.grid(row=2, column=0, sticky="ew", pady=(10, 0))
             self.detail_label = ttk.Label(self.detail.body, text="Select a connection to see its details.", style="Dim.TLabel", wraplength=900, justify="left")
@@ -1686,14 +1723,14 @@ def build_app():
             self.host_menu.add_separator()
             self.host_menu.add_command(label="Block / unblock host", command=self.block_selected_host)
             self.host_menu.add_command(label="Alert on this host", command=self.watch_selected_host)
-            self.host_tree.bind("<Button-3>", lambda e: self.popup(self.host_tree, self.host_menu, e))
+            bind_context_menu(self.host_tree, lambda e: self.popup(self.host_tree, self.host_menu, e))
             ttk.Label(f, text="A host that is kept ready always has a tunnel waiting, so the first connection to it doesn't wait for the route. "
                               "It costs the hops one extra tunnel setup every couple of minutes per host — keep it for the few sites you use all the time.",
                       style="BgDim.TLabel", wraplength=1000, justify="left").grid(row=2, column=0, sticky="w", pady=(10, 0))
 
         def _build_browser(self, f):
             f.columnconfigure((0, 1), weight=1, uniform="b")
-            a = Card(f, radius=14, pad=(18, 14))
+            a = Card(f, radius=14, pad=(18, 10))
             a.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
             ttk.Label(a.body, text="Proxy address", style="H.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
             ttk.Label(a.body, text="Point any program at it. One port speaks both.", style="Dim.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 10))
@@ -1710,7 +1747,7 @@ def build_app():
             self.curl_btn = Btn(a.body, text="Copy a curl example", style="Small.TButton", command=self.copy_curl)
             self.curl_btn.grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
-            b = Card(f, radius=14, pad=(18, 14))
+            b = Card(f, radius=14, pad=(18, 10))
             b.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
             ttk.Label(b.body, text="Check it works", style="H.TLabel").grid(row=0, column=0, sticky="w")
             ttk.Label(b.body, text="Loads one HTTPS page through the proxy and the whole route.", style="Dim.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 10))
@@ -1720,7 +1757,7 @@ def build_app():
             self.test_result.grid(row=3, column=0, sticky="w", pady=(10, 0))
             b.body.columnconfigure(0, weight=1)
 
-            c = Card(f, radius=14, pad=(18, 14))
+            c = Card(f, radius=14, pad=(18, 10))
             c.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
             c.body.columnconfigure((0, 1), weight=1, uniform="ff")
             left = ttk.Frame(c.body, style="Card.TFrame")
@@ -1737,13 +1774,13 @@ def build_app():
             self.quiet_var = tk.BooleanVar(value=bool(self.settings.get("quiet", True)))
             self.webrtc_var = tk.BooleanVar(value=bool(self.settings.get("webrtc", True)))
             Check(left, text="Quiet the browser's own background connections", variable=self.quiet_var, command=self.save_prefs).grid(row=2, column=0, sticky="w", pady=(10, 0))
-            ttk.Label(left, text="Updates, telemetry and sync checks each open a tunnel of their own\nand slow your pages down.",
+            ttk.Label(left, text="Updates, telemetry and sync each open tunnels and slow pages down.",
                       style="Dim.TLabel", justify="left").grid(row=3, column=0, sticky="w", padx=(26, 0))
             Check(left, text="Block WebRTC", variable=self.webrtc_var, command=self.save_prefs).grid(row=4, column=0, sticky="w", pady=(10, 0))
-            ttk.Label(left, text="WebRTC can reveal your real address to a website,\nbypassing the proxy.",
+            ttk.Label(left, text="WebRTC can show a website your real address, around the proxy.",
                       style="Dim.TLabel", justify="left").grid(row=5, column=0, sticky="w", padx=(26, 0))
             self.open_btn = Btn(left, text="Open browser through ZTR", style="Primary.TButton", command=self.open_browser)
-            self.open_btn.grid(row=6, column=0, sticky="w", pady=(16, 0))
+            self.open_btn.grid(row=6, column=0, sticky="w", pady=(12, 0))
             self.browser_note = ttk.Label(left, text="", style="Dim.TLabel", wraplength=420, justify="left")
             self.browser_note.grid(row=7, column=0, sticky="w", pady=(6, 0))
             self.browser_var.set(next((b["label"] for b in self.browsers if b["key"] == self.settings.get("browser")),

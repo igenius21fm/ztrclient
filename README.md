@@ -13,11 +13,11 @@ ZTRelay platform (Downloads page → "Read the docs").
 
 ## Requirements
 
-- Python 3.8+
-- **Linux** (systemd) or **macOS** (launchd) — each has its own installer: `installer-linux.sh` and `installer-macos.sh`.
+- Python 3.12 or newer. (The `python3` Apple ships with a Mac is older — install one with `brew install python@3.13` or from python.org; the installer finds it.)
+- **Linux** (systemd) or **macOS** (launchd). One installer, `installer.sh`, picks the right one for your system; `installer-linux.sh` and `installer-macos.sh` can also be run directly.
 - No manual `pip install` — the installer sets up its own isolated venv.
-- For Ferry (optional, Linux desktop only): Python's `tkinter`, `rsync` and `ssh`.
-- For the ZTR Proxy window (optional, Linux desktop only): Python's `tkinter`. The proxy itself, started with `ztr_proxy --cli`, needs nothing extra.
+- For Ferry (optional): a desktop, Python's Tk (Linux: `tkinter`; macOS: Tk 8.6 or newer), `rsync` and `ssh`.
+- For the ZTR Proxy window (optional): a desktop and Python's Tk, as for Ferry. The proxy itself, started with `ztr_proxy --cli`, needs nothing extra.
 
 ## Install
 
@@ -43,27 +43,28 @@ To pin an exact version instead, replace `${ZTR_VERSION}` with a tag from
 the [releases page](https://github.com/igenius21fm/ztrclient/releases)
 directly.
 
-Then run the installer for your OS:
+Then run the installer:
 
 ```bash
-./installer-linux.sh   # Linux
-./installer-macos.sh   # macOS
+./installer.sh
 ```
 
-The two take the same flags and ask the same questions; everything below
-applies to both unless it says otherwise.
+It works out whether you're on Linux or macOS and runs `installer-linux.sh`
+or `installer-macos.sh` with whatever flags you gave it. The two take the same
+flags and ask the same questions; everything below applies to both unless it
+says otherwise.
 
 With no flags, it walks you through everything interactively (see
 [Installer prompts](#installer-prompts) below) — no flags are required for a
 normal install. Under the hood, it:
 
-1. Makes `plugins/{ztr_ssh,ztr_forward,ztr_pg}` executable — a zip download
+1. Makes the wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry`, `ztr_proxy`) executable — a zip download
    or fresh `git clone` doesn't reliably preserve the executable bit.
 2. Creates a dedicated venv (default `~/.local/share/ztr/ztr_venv`) and installs
    `pycryptodome` into it, isolated from your system Python.
 3. Creates `routes/` next to `ztrClient.py` — every `.ztr` config you
    download has to live there.
-4. Symlinks the three wrappers into `~/.local/bin` (or `--prefix`), and
+4. Symlinks the wrappers into `~/.local/bin` (or `--prefix`), and
    optionally adds that to your `PATH` plus shell aliases — for the
    wrappers, and a `ztr_venv` alias for activating the venv from step 2
    directly, whichever of those aren't already set up.
@@ -90,8 +91,8 @@ installs, where the interactive prompts are skipped automatically anyway
 | `--with-service` | Set up the tunnel service non-interactively (implies `--with-local-ip`). |
 | `--with-dashboard` | Set up the dashboard service non-interactively. |
 | `--with-requests` | Set up the request-composer service non-interactively. |
-| `--with-ferry` | Add Ferry to your applications menu and check what it needs (Linux only). |
-| `--with-proxy` | Add ZTR Proxy to your applications menu and check what it needs (Linux only). |
+| `--with-ferry` | Add Ferry to your applications menu (an app in `~/Applications` on macOS) and check what it needs. |
+| `--with-proxy` | Add ZTR Proxy to your applications menu (an app in `~/Applications` on macOS) and check what it needs. |
 | `--with-local-ip` | Set up the dedicated IP non-interactively (a dummy interface on Linux, a `lo0` alias on macOS). |
 | `--local-ip IP` | Use `IP` instead of the default `10.10.15.10`. |
 | `--uninstall` | Remove everything the installer set up — wrappers, venv, every service, PATH/alias lines, and the dedicated IP. |
@@ -99,10 +100,8 @@ installs, where the interactive prompts are skipped automatically anyway
 
 ```bash
 # fully non-interactive install, custom prefix, both services + custom IP
-./installer-linux.sh --with-service --with-dashboard --local-ip 10.10.15.20 --prefix "$HOME/bin"
+./installer.sh --with-service --with-dashboard --local-ip 10.10.15.20 --prefix "$HOME/bin"
 ```
-
-On macOS, use `./installer-macos.sh` with the same flags.
 
 ## Installer prompts
 
@@ -160,17 +159,19 @@ installer skips service setup cleanly and tells you to re-run with
 `--with-service`/`--with-dashboard` once the file's actually in `routes/`.
 
 **6. `Add Ferry (the file manager) to your applications menu? [y/N]:`**
-(Linux only; asked right after the service questions.) Adds a launcher and
-icon for Ferry under `~/.local/share`, and checks that Python's `tkinter`,
-`rsync` and `ssh` are there — anything missing is named with the `apt`
-package that provides it. `ztr_ferry` works from any terminal whichever way
-you answer.
+(Asked right after the service questions; on macOS it reads "…to your
+Applications?".) Adds a launcher and icon for Ferry — under `~/.local/share`
+on Linux, as `Ferry.app` in `~/Applications` on macOS — and checks that
+Python's Tk, `rsync` and `ssh` are there. Anything missing is named with the
+command that provides it (`apt` on Linux, `brew` on macOS). `ztr_ferry` works
+from any terminal whichever way you answer.
 
 **7. `Add ZTR Proxy (the browser-proxy window) to your applications menu? [y/N]:`**
-(Linux only; asked right after the Ferry question.) Adds a launcher and icon
-for ZTR Proxy under `~/.local/share` and checks that Python's `tkinter` is
-there, naming the `apt` package if it isn't. `ztr_proxy` works from any
-terminal whichever way you answer.
+(Asked right after the Ferry question.) Adds a launcher and icon for ZTR
+Proxy — under `~/.local/share` on Linux, as `ZTR Proxy.app` in
+`~/Applications` on macOS — and checks that Python's Tk is there, naming the
+package that provides it if it isn't. `ztr_proxy` works from any terminal
+whichever way you answer.
 
 ## Getting connected
 
@@ -294,8 +295,7 @@ its own route's exit address.
 `ztr_ferry` opens Ferry: your computer on one side, a server on the other,
 with tabs, a transfer queue, bookmarks, saved sites, and a button that opens
 a `ztr_ssh` terminal into the server you're on. It rides on the same tunnel
-service as `ztr_ssh`. Linux desktop only for now (`installer-macos.sh` does
-not install it). See [plugins/README.md](ztrclient/plugins/README.md#ztr_ferrypy--ferry-a-file-manager)
+service as `ztr_ssh`. Runs on Linux and macOS. See [plugins/README.md](ztrclient/plugins/README.md#ztr_ferrypy--ferry-a-file-manager)
 for how it works and what it can do.
 
 ## ZTR Proxy — your browser through a route
@@ -324,8 +324,7 @@ ztr_proxy --cli --config-file NAME.ztr   # no window: run the proxy in this term
 
 HTTPS passes through untouched — the proxy never sees inside it. See
 [plugins/README.md](ztrclient/plugins/README.md#ztr_proxy--the-browser-proxy)
-for every option and where its settings are kept. Linux desktop only for now
-(`installer-macos.sh` does not install it).
+for every option and where its settings are kept. Runs on Linux and macOS.
 
 ## Troubleshooting
 
@@ -341,15 +340,23 @@ installer couldn't reach your user's launchd session, usually because you
 reached this shell through `su`/`sudo` into the account. Log in as that user
 directly (Terminal or SSH) and re-run.
 
-**`python3 not found (or not usable)`** (macOS) — a fresh Mac has a
-`python3` stub that only prompts to install the Xcode command line tools.
-Install Python with `brew install python` or `xcode-select --install`, then
-re-run.
+**`no Python 3.12 or newer found`** (macOS) — the `python3` Apple ships
+(and the stub a fresh Mac has, which only prompts to install the Xcode
+command line tools) is older than the 3.12 that `ztrClient.py` needs. Install
+a newer one with `brew install python@3.13` or from python.org, then re-run;
+set `ZTR_PYTHON` to its path if the installer picks a different one.
 
-**`permission denied` on `./installer-linux.sh`** (or `installer-macos.sh`) —
-you're on a release zip built before v1.0.2, which shipped without the
-executable bit. Either `chmod +x installer-linux.sh` (or
-`installer-macos.sh`) yourself, or re-download
+**`This Python has no Tk 8.6 or newer`** (macOS, Ferry or ZTR Proxy) — Apple's
+Python has Tk 8.5 and Homebrew's `python@3.x` comes without Tk. Run
+`brew install python-tk@3.13` (use your Python's version), or install Python
+from python.org, which includes it. If the installer already built its
+environment from a Python without Tk, remove it (`rm -rf
+~/.local/share/ztr/ztr_venv`) and re-run so it picks one with Tk.
+
+**`permission denied` on `./installer.sh`** (or `installer-linux.sh` /
+`installer-macos.sh`) — you're on a release zip built before v1.0.2, which
+shipped without the executable bit. Either `chmod +x installer*.sh` yourself
+(or run it as `bash installer.sh`), or re-download
 the [latest release](https://github.com/igenius21fm/ztrclient/releases/latest).
 
 **`couldn't create the venv — ... sudo apt install python3-venv`** (Linux)
@@ -417,11 +424,23 @@ traceback.
 
 ## macOS notes
 
-- **ZTR Proxy.** The proxy window is Linux-only for now, so the macOS
-  installer doesn't install `ztr_proxy` or take `--with-proxy`.
-
-- **Ferry.** The file manager is Linux-only for now, so the macOS installer
-  doesn't install `ztr_ferry` or take `--with-ferry`.
+- **Python.** `ztrClient.py` needs Python 3.12 or newer, and Ferry's and ZTR
+  Proxy's windows need a Python whose Tk is 8.6 or newer. The installer looks
+  for one that has both and says what to install if it can't find it
+  (`brew install python@3.13 python-tk@3.13`, or python.org's installer).
+- **Ferry and ZTR Proxy** open from `~/Applications` (Launchpad, Spotlight) or
+  from a terminal with `ztr_ferry` and `ztr_proxy`; their messages go to
+  `~/Library/Logs/ztr/ferry.log` and `proxy.log`. macOS stops apps from
+  reading Downloads, Desktop and Documents unless you allow it, so keep the
+  ztrclient folder somewhere else (for example `~/ztrclient`) — the installer
+  warns you if it isn't. Shortcuts use the Command key (`⌘T`, `⌘W`, `⌘,`).
+  Ferry's `ztr_ssh` button opens a Terminal window.
+- **Ferry's transfers** use the `rsync` that macOS ships (it works, without
+  the progress totals of rsync 3). Small-file transfers take the faster tar
+  path only if GNU tar is installed (`brew install gnu-tar`); otherwise Ferry
+  uses rsync for them too.
+- **ZTR Proxy** finds the browsers in `/Applications` and `~/Applications`:
+  Firefox, Chromium, Chrome, Brave, Edge and Vivaldi.
 
 - **Dedicated IP.** macOS can't create a dummy interface, so
   `--with-local-ip` adds the address as an alias on `lo0` and installs a
@@ -437,10 +456,11 @@ traceback.
 ## Uninstall
 
 ```bash
-./installer-linux.sh --uninstall   # or ./installer-macos.sh --uninstall
+./installer.sh --uninstall
 ```
 
-Removes the symlinked wrappers, the menu launchers and icons for Ferry and ZTR Proxy, the venv, whichever background services were
+Removes the symlinked wrappers, the menu launchers and icons for Ferry and
+ZTR Proxy (the two apps in `~/Applications` on macOS), the venv, whichever background services were
 set up (the tunnel service, the dashboard, the request composer, or any
 combination), the PATH/alias lines from your rc file, and the dedicated IP
 (if any) — everything the
@@ -472,7 +492,8 @@ configs in it are left alone.
   [README](ztrclient/routes/README.md), which documents every field in a `.ztr`
   config — the installer's `mkdir -p` would create the folder anyway, but
   it's here from the start so it's not a surprise.
-- `installer-linux.sh`, `installer-macos.sh` — see [Install](#install).
+- `installer.sh` — the installer to run: it picks `installer-linux.sh` or
+  `installer-macos.sh` for your system. See [Install](#install).
 
 ## Example apps
 

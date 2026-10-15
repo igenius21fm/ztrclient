@@ -407,7 +407,8 @@ class AskpassHelper:
     def env(self, password):
         env = dict(os.environ)
         env.update({"SSH_ASKPASS": str(self.script), "SSH_ASKPASS_REQUIRE": "force", "ZTR_FERRY_PW": password})
-        env.setdefault("DISPLAY", ":0")
+        if sys.platform != "darwin":
+            env.setdefault("DISPLAY", ":0")  # ssh only runs the helper when it thinks there is a display
         return env
 
     def close(self):
@@ -532,6 +533,36 @@ TERMINALS = [  # (program, how it takes a title, how it takes the command to run
 ]
 
 
+def find_gnu_tar():
+    """This computer's GNU tar (the fast path for a few small files needs its skip/keep-newer options): `tar` on Linux,
+    `gtar` (Homebrew's gnu-tar) on a Mac, whose own tar is bsdtar. None if there isn't one."""
+    for name in ("gtar", "tar"):
+        path = shutil.which(name)
+        if not path:
+            continue
+        try:
+            if "GNU tar" in subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout:
+                return path
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+# The modifier a shortcut uses: Command on a Mac, Control elsewhere.
+MOD = "Command" if sys.platform == "darwin" else "Control"
+
+
+def mac_terminal_argv(inner):
+    """On a Mac: asks Terminal to open a window running `inner`. None if osascript isn't there."""
+    osascript = shutil.which("osascript")
+    if not osascript:
+        return None
+    command = " ".join(shlex.quote(a) for a in inner)
+    quoted = command.replace("\\", "\\\\").replace('"', '\\"')
+    script = 'tell application "Terminal"\nactivate\ndo script "' + quoted + '"\nend tell'
+    return [osascript, "-e", script]
+
+
 def find_ztr_ssh():
     """The ztr_ssh wrapper that sits next to this file, else one on the PATH (FERRY_ZTR_SSH overrides both)."""
     forced = os.environ.get("FERRY_ZTR_SSH")
@@ -556,6 +587,8 @@ def terminal_argv(argv, title="Ferry"):
     forced = os.environ.get("FERRY_TERMINAL", "").strip()
     if forced:
         return shlex.split(forced) + inner
+    if sys.platform == "darwin":
+        return mac_terminal_argv(inner)
     for program, title_args, run_args in TERMINALS:
         path = shutil.which(program)
         if path:
@@ -612,6 +645,7 @@ class Connection:
         self.dir = self.sock = None
         self.warm = False
         self.fast_ok = None  # can both ends do the tar fast path? learned on first use
+        self.local_tar = None
 
     # -- opening and closing
 
@@ -815,10 +849,8 @@ class Connection:
         if len(parents) != 1:
             return None
         if self.fast_ok is None:  # the local side needs GNU tar for its skip/keep-newer options
-            try:
-                self.fast_ok = "GNU tar" in subprocess.run(["tar", "--version"], capture_output=True, text=True, timeout=10).stdout
-            except (OSError, subprocess.SubprocessError):
-                self.fast_ok = False
+            self.local_tar = find_gnu_tar()
+            self.fast_ok = bool(self.local_tar)
             if not self.fast_ok:
                 return None
         base = parents.pop() or "/"
@@ -833,10 +865,10 @@ class Connection:
         q = shlex.quote
         if job.direction == "download":
             first = self._base() + [self._target(), "LC_ALL=C tar -C " + q(base) + " -cf - " + " ".join(q(n) for n in names)]
-            second = ["tar", "-C", str(job.dest), "-xf", "-", "-p", "-v"] + flags
+            second = [self.local_tar, "-C", str(job.dest), "-xf", "-", "-p", "-v"] + flags
             first_env, second_env = None, env
         else:
-            first = ["tar", "-C", base, "-cf", "-"] + names
+            first = [self.local_tar, "-C", base, "-cf", "-"] + names
             second = self._base() + [self._target(), "LC_ALL=C tar -C " + q(job.dest) + " -xf - -p -v " + " ".join(flags)]
             first_env, second_env = env, None
         emit("log", ("$ " + " | ".join(" ".join(shlex.quote(c) for c in cmd) for cmd in (first, second)), "cmd"))
@@ -2136,7 +2168,7 @@ def build_app():
             t.bind("<F5>", lambda e: app.go(self, self.path))
             t.bind("<F2>", lambda e: app.rename(self))
             t.bind("<Delete>", lambda e: app.delete(self))
-            t.bind("<Control-a>", self._select_all)
+            t.bind(f"<{MOD}-a>", self._select_all)
             t.bind("<Button-3>", self._menu)
             t.bind("<Button-2>", self._menu)
             if sys.platform == "darwin":
@@ -3058,7 +3090,8 @@ def build_app():
                 cport = DEFAULT_CONTROL_PORT
             argv = terminal_argv(conn.ztr_ssh_argv(script, cport), f"ztr_ssh {conn.user}@{conn.host}")
             if not argv:
-                return self._set_status("No terminal program was found. Install lxterminal or xterm, or set FERRY_TERMINAL.", "err")
+                return self._set_status("Terminal couldn't be opened (osascript wasn't found). Set FERRY_TERMINAL to a terminal program that takes a command after -e." if sys.platform == "darwin"
+                                        else "No terminal program was found. Install lxterminal or xterm, or set FERRY_TERMINAL.", "err")
             try:
                 subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
@@ -3409,9 +3442,9 @@ def build_app():
             self._build()
             self.new_tab(first=True)
             root.protocol("WM_DELETE_WINDOW", self._on_close)
-            root.bind("<Control-t>", lambda e: self.new_tab())
-            root.bind("<Control-w>", lambda e: self.close_tab())
-            root.bind("<Control-comma>", lambda e: self.open_settings())
+            root.bind(f"<{MOD}-t>", lambda e: self.new_tab())
+            root.bind(f"<{MOD}-w>", lambda e: self.close_tab())
+            root.bind(f"<{MOD}-comma>", lambda e: self.open_settings())
             self._poll_events()
             self._poll_service()
 
@@ -3700,7 +3733,11 @@ def main():
     try:
         import tkinter as tk
     except ImportError:
-        print("This needs Python's tkinter. On Debian/Raspberry Pi OS: sudo apt install python3-tk")
+        if sys.platform == "darwin":
+            print("This needs Python's tkinter. With Homebrew: brew install python-tk@%d.%d (or use the python.org installer, which includes it)."
+                  % sys.version_info[:2])
+        else:
+            print("This needs Python's tkinter. On Debian/Raspberry Pi OS: sudo apt install python3-tk")
         return 1
     Shell = build_app()
     root = tk.Tk()

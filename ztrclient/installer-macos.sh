@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # macOS installer for the ZTRelay plugin wrappers (ztr_ssh, ztr_forward,
-# ztr_pg) so they run from anywhere, without a manual shell alias per
+# ztr_pg, ztr_ferry — the launcher for the Ferry file manager — and ztr_proxy,
+# the launcher for the browser-proxy window) so they run from anywhere,
+# without a manual shell alias per
 # docs/ztrclient's "Alias it" sections. Does NOT touch the platform or
 # ztrClient.py itself — this is scoped to plugins/ only (which is also
 # where ztr_tunnel_lp.py, ztr_dashboard.py, ztr_https.py, and ztr_requests/
@@ -12,22 +14,27 @@
 #   ./installer-macos.sh --with-service        also set up ztr_tunnel_lp.py as a launchd user agent
 #   ./installer-macos.sh --with-dashboard      also set up ztr_dashboard.py as a launchd user agent
 #   ./installer-macos.sh --with-requests       also set up ztr_requests (request-composer web UI) as a launchd user agent
+#   ./installer-macos.sh --with-ferry          also add Ferry (the file manager) to your Applications, and check what it needs
+#   ./installer-macos.sh --with-proxy          also add ZTR Proxy (the browser-proxy window) to your Applications, and check what it needs
 #   ./installer-macos.sh --with-local-ip       also set up a dedicated loopback address for tunneled sessions
 #   ./installer-macos.sh --local-ip IP         use IP instead of the default 10.10.15.10
 #   ./installer-macos.sh --uninstall           remove the installed wrappers (agents, venv, and loopback address, if present)
 #
 # Run with no flags in an actual terminal and it just asks: whether to set
-# up each service, and (if any of the three, or if --with-local-ip was
-# passed) what IP to use. --with-service/--with-dashboard/--with-requests/
-# --with-local-ip/--local-ip above are for skipping those prompts —
+# up each service, whether to add Ferry and ZTR Proxy to your Applications,
+# and (if any of the three services, or if --with-local-ip was passed) what
+# IP to use. --with-service/--with-dashboard/--with-requests/--with-ferry/
+# --with-proxy/--with-local-ip/--local-ip above are for skipping those prompts —
 # non-interactive runs (CI, provisioning scripts, piped input) skip them
 # automatically and just take the flags/defaults given.
 #
 # What it actually does:
-#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg} executable — a zip
+#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy} executable — a zip
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
-#   2. Checks that python3 works, then creates a dedicated venv for ztr
+#   2. Looks for a Python 3.12 or newer (ztrClient.py needs it — the python3
+#      Apple ships is older; Homebrew's or python.org's will do, or set
+#      ZTR_PYTHON to the one you want), then creates a dedicated venv for ztr
 #      (default ~/.local/share/ztr/ztr_venv) if one isn't already there, and
 #      installs pycryptodome into it — ztr_tunnel_lp.py imports RelayClient
 #      from ztrClient.py, which needs it. Keeping this in its own venv
@@ -38,8 +45,8 @@
 #      into it — only needed for the dashboard's live traffic panel. With
 #      --with-requests, also installs Pillow — ztr_requests/server.py needs
 #      it to sniff/decode image responses.
-#   3. Symlinks the three wrappers into --prefix (default ~/.local/bin),
-#      so `ztr_ssh`/`ztr_forward`/`ztr_pg` work from any shell, not just
+#   3. Symlinks the wrappers into --prefix (default ~/.local/bin),
+#      so `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: adds --local-ip (default 10.10.15.10) as an
 #      extra address on the loopback interface (`ifconfig lo0 alias`), so
@@ -65,13 +72,31 @@
 #      there can carry a route's real identifier/secret_key-backed tunnel.
 #      No route config needed up front; it picks one per request from
 #      whatever's in routes/.
+#   8. With --with-ferry or --with-proxy: checks that the Python it set up
+#      has Tk 8.6 or newer for the window (Apple's and Homebrew's default
+#      python3 don't — it tells you the `brew install python-tk@X.Y` line,
+#      or use the python.org installer, which includes Tk) and puts Ferry.app
+#      / "ZTR Proxy.app" in ~/Applications, so they open from Launchpad and
+#      Spotlight like any other app. `ztr_ferry` and `ztr_proxy` from a
+#      terminal work either way (`ztr_proxy --cli` runs the proxy without a
+#      window).
 #
-# Agent logs go to ~/Library/Logs/ztr/<name>.log.
+# Agent logs go to ~/Library/Logs/ztr/<name>.log; Ferry's and ZTR Proxy's go
+# to ferry.log and proxy.log in the same folder.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$SCRIPT_DIR/plugins"
-WRAPPERS=(ztr_ssh ztr_forward ztr_pg)
+WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy)
+
+# Where a wrapper's launcher script lives. Most sit directly in plugins/;
+# ZTR Proxy keeps all of its files in its own folder.
+wrapper_path() {
+  case "$1" in
+    ztr_proxy) echo "$PLUGINS_DIR/ztr_proxy/ztr_proxy" ;;
+    *) echo "$PLUGINS_DIR/$1" ;;
+  esac
+}
 
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 VENV_DIR="${VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}"
@@ -83,6 +108,10 @@ WITH_DASHBOARD=0
 WITH_DASHBOARD_SET_BY_USER=0
 WITH_REQUESTS=0
 WITH_REQUESTS_SET_BY_USER=0
+WITH_FERRY=0
+WITH_FERRY_SET_BY_USER=0
+WITH_PROXY=0
+WITH_PROXY_SET_BY_USER=0
 WITH_LOCAL_IP=0
 UNINSTALL=0
 ZTR_CONFIG_NAME=""
@@ -130,6 +159,16 @@ while [[ $# -gt 0 ]]; do
       WITH_REQUESTS_SET_BY_USER=1
       shift
       ;;
+    --with-ferry)
+      WITH_FERRY=1
+      WITH_FERRY_SET_BY_USER=1
+      shift
+      ;;
+    --with-proxy)
+      WITH_PROXY=1
+      WITH_PROXY_SET_BY_USER=1
+      shift
+      ;;
     --with-local-ip)
       WITH_LOCAL_IP=1
       shift
@@ -171,6 +210,9 @@ REQUESTS_SERVICE_UNIT="$AGENT_DIR/$REQUESTS_LABEL.plist"
 LO_IF="lo0"
 LOOPBACK_DAEMON_LABEL="net.ztrelay.loopback-alias"
 LOOPBACK_DAEMON_UNIT="/Library/LaunchDaemons/$LOOPBACK_DAEMON_LABEL.plist"
+APPS_DIR="$HOME/Applications"
+FERRY_APP="$APPS_DIR/Ferry.app"
+PROXY_APP="$APPS_DIR/ZTR Proxy.app"
 
 # Ask up front rather than requiring you to already know the flag exists —
 # only when you didn't already say one way or the other with --with-service,
@@ -200,6 +242,21 @@ if [[ "$WITH_REQUESTS_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
   read -r -p "Set up ztr_requests (Postman-style request UI) as a persistent launchd user agent? [y/N]: " WITH_REQUESTS_ANSWER
   case "$WITH_REQUESTS_ANSWER" in
     [yY]*) WITH_REQUESTS=1 ;;
+  esac
+fi
+
+# Ferry and ZTR Proxy are windows, so each is a plain yes/no of its own —
+# they work with or without the services above.
+if [[ "$WITH_FERRY_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Add Ferry (the file manager) to your Applications? [y/N]: " WITH_FERRY_ANSWER
+  case "$WITH_FERRY_ANSWER" in
+    [yY]*) WITH_FERRY=1 ;;
+  esac
+fi
+if [[ "$WITH_PROXY_SET_BY_USER" -eq 0 && "$UNINSTALL" -eq 0 && -t 0 ]]; then
+  read -r -p "Add ZTR Proxy (the browser-proxy window) to your Applications? [y/N]: " WITH_PROXY_ANSWER
+  case "$WITH_PROXY_ANSWER" in
+    [yY]*) WITH_PROXY=1 ;;
   esac
 fi
 
@@ -288,6 +345,104 @@ detect_rc_file() {
     bash) echo "$HOME/.bash_profile" ;;
     *) echo "$HOME/.profile" ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# Python and app-bundle helpers.
+
+# ztrClient.py uses syntax from Python 3.12, so that is the oldest this can use.
+py_ok() { "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; }
+# Ferry's and ZTR Proxy's windows need Tk 8.6 or newer (Apple's built-in Python has 8.5).
+py_has_tk() { "$1" -c 'import sys, tkinter; sys.exit(0 if tkinter.TkVersion >= 8.6 else 1)' >/dev/null 2>&1; }
+
+# find_python WANT_TK: prints a Python 3.12+ — with a usable Tk if WANT_TK is 1 and
+# one exists, otherwise any. ZTR_PYTHON picks one outright. Returns 1 if there is none.
+find_python() {
+  local want_tk="$1" candidate best="" found
+  for candidate in "${ZTR_PYTHON:-}" python3 python3.14 python3.13 python3.12 \
+      /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
+      /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
+      /Library/Frameworks/Python.framework/Versions/Current/bin/python3; do
+    [[ -n "$candidate" ]] || continue
+    found="$(command -v "$candidate" 2>/dev/null || true)"
+    [[ -n "$found" ]] || continue
+    # Without the Xcode command line tools /usr/bin/python3 is a stub that pops up an install dialog.
+    if [[ "$found" == /usr/bin/python3 ]] && ! xcode-select -p >/dev/null 2>&1; then
+      continue
+    fi
+    py_ok "$found" || continue
+    if [[ "$want_tk" -eq 0 ]] || py_has_tk "$found"; then
+      echo "$found"
+      return 0
+    fi
+    [[ -n "$best" ]] || best="$found"
+  done
+  [[ -n "$best" ]] || return 1
+  echo "$best"
+}
+
+# make_icns PNG OUT.icns — builds the icon file an app bundle uses from a square PNG.
+make_icns() {
+  local png="$1" out="$2" set size
+  set="$(mktemp -d -t ztr_icon)/AppIcon.iconset"
+  mkdir -p "$set"
+  for size in 16 32 64 128; do
+    sips -z "$size" "$size" "$png" --out "$set/icon_${size}x${size}.png" >/dev/null 2>&1 || return 1
+  done
+  cp "$set/icon_32x32.png" "$set/icon_16x16@2x.png"
+  cp "$set/icon_64x64.png" "$set/icon_32x32@2x.png"
+  cp "$set/icon_128x128.png" "$set/icon_128x128@2x.png" 2>/dev/null || true
+  rm -f "$set/icon_64x64.png"
+  iconutil -c icns "$set" -o "$out" >/dev/null 2>&1
+  local status=$?
+  rm -rf "$(dirname "$set")"
+  return "$status"
+}
+
+# make_app_bundle APP NAME BUNDLE_ID LAUNCHER ICON_PNG LOGNAME — a small app that just runs
+# the launcher in the foreground, so Ferry / ZTR Proxy open from Launchpad and Spotlight.
+# Anything it prints goes to ~/Library/Logs/ztr/LOGNAME.log, since an app has no terminal.
+make_app_bundle() {
+  local app="$1" name="$2" bundle_id="$3" launcher="$4" png="$5" logname="$6"
+  rm -rf "$app"
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo '<plist version="1.0">'
+    echo '<dict>'
+    echo "  <key>CFBundleName</key><string>$(xml_escape "$name")</string>"
+    echo "  <key>CFBundleDisplayName</key><string>$(xml_escape "$name")</string>"
+    echo "  <key>CFBundleIdentifier</key><string>$(xml_escape "$bundle_id")</string>"
+    echo '  <key>CFBundleExecutable</key><string>launch</string>'
+    echo '  <key>CFBundleIconFile</key><string>AppIcon</string>'
+    echo '  <key>CFBundlePackageType</key><string>APPL</string>'
+    echo '  <key>CFBundleVersion</key><string>1</string>'
+    echo '  <key>LSMinimumSystemVersion</key><string>10.13</string>'
+    echo '  <key>NSHighResolutionCapable</key><true/>'
+    echo '</dict>'
+    echo '</plist>'
+  } > "$app/Contents/Info.plist"
+  {
+    echo '#!/bin/bash'
+    echo "# written by the ztrclient installer (--uninstall removes this app)"
+    echo "export ZTR_VENV_DIR=$(printf '%q' "$VENV_DIR")"
+    echo "mkdir -p $(printf '%q' "$LOG_DIR")"
+    echo "exec $(printf '%q' "$launcher") --foreground >> $(printf '%q' "$LOG_DIR/$logname.log") 2>&1"
+  } > "$app/Contents/MacOS/launch"
+  chmod +x "$app/Contents/MacOS/launch"
+  : > "$app/Contents/Resources/.ztrclient-installer"
+  make_icns "$png" "$app/Contents/Resources/AppIcon.icns" || log_warn "couldn't build $name's icon — the app will have the default one."
+  plutil -lint "$app/Contents/Info.plist" >/dev/null
+}
+
+# Removes an app bundle, but only one this installer wrote.
+remove_app_bundle() {
+  local app="$1" name="$2"
+  if [[ -f "$app/Contents/Resources/.ztrclient-installer" ]]; then
+    rm -rf "$app"
+    log_ok "$name removed from $APPS_DIR."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -394,7 +549,7 @@ uninstall() {
     local link="$PREFIX/$name"
     # Only remove it if it's actually our symlink — never clobber some
     # unrelated file that happens to share the name.
-    if [[ -L "$link" ]] && [[ "$(readlink "$link")" == "$PLUGINS_DIR/$name" ]]; then
+    if [[ -L "$link" ]] && [[ "$(readlink "$link")" == "$(wrapper_path "$name")" ]]; then
       rm -f "$link"
       removed=1
     fi
@@ -404,6 +559,9 @@ uninstall() {
   else
     log_warn "no installed wrappers found in $PREFIX."
   fi
+
+  remove_app_bundle "$FERRY_APP" "Ferry"
+  remove_app_bundle "$PROXY_APP" "ZTR Proxy"
 
   local label unit
   for pair in "$SERVICE_LABEL:$SERVICE_UNIT" "$DASHBOARD_LABEL:$DASHBOARD_SERVICE_UNIT" "$REQUESTS_LABEL:$REQUESTS_SERVICE_UNIT"; do
@@ -436,7 +594,7 @@ uninstall() {
     tmp_rc="$(mktemp -t ztr_rc)"
     grep -vxF "$path_line" "$rc_file" > "$tmp_rc" || true
     for name in "${WRAPPERS[@]}"; do
-      local alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
+      local alias_line="alias $name=\"$(wrapper_path "$name")\"  # added by ztrclient installer"
       grep -vxF "$alias_line" "$tmp_rc" > "$tmp_rc.next" || true
       mv "$tmp_rc.next" "$tmp_rc"
     done
@@ -494,27 +652,32 @@ fi
 
 log_info "checking prerequisites ..."
 
-# `command -v` alone isn't enough on a Mac: without the Xcode command line
-# tools, /usr/bin/python3 exists but is a stub that pops up an install
-# dialog instead of running Python.
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import sys" >/dev/null 2>&1; then
-  log_err "python3 not found (or not usable) — required by every plugin wrapper and by ztr_tunnel_lp.py itself."
-  log_warn "install it with Homebrew ('brew install python') or the Xcode command line tools ('xcode-select --install'), then re-run."
-  exit 1
-fi
-log_ok "python3 found ($(command -v python3))."
+WANT_TK=0
+[[ "$WITH_FERRY" -eq 1 || "$WITH_PROXY" -eq 1 ]] && WANT_TK=1
 
 VENV_PY="$VENV_DIR/bin/python3"
 if [[ -x "$VENV_PY" ]]; then
   log_ok "ztr venv already exists at $VENV_DIR."
+  if ! py_ok "$VENV_PY"; then
+    log_warn "that venv's Python is older than 3.12, which ztrClient.py needs. Remove it (rm -rf $VENV_DIR) and re-run to rebuild it with a newer Python."
+  fi
 else
+  # `command -v` alone isn't enough on a Mac: without the Xcode command line
+  # tools, /usr/bin/python3 exists but is a stub that pops up an install
+  # dialog instead of running Python — find_python skips it.
+  if ! BASE_PY="$(find_python "$WANT_TK")"; then
+    log_err "no Python 3.12 or newer found — ztrClient.py needs it (the python3 Apple ships is older)."
+    log_warn "install one with Homebrew ('brew install python@3.13') or from python.org, then re-run."
+    exit 1
+  fi
+  log_ok "using $("$BASE_PY" --version 2>&1) ($BASE_PY)."
   log_info "creating ztr's venv at $VENV_DIR ..."
   mkdir -p "$(dirname "$VENV_DIR")"
   # --copies, not the default symlink-to-system-python3 — keeps the venv's
   # interpreter a real file of its own, so nothing done to it (permissions,
   # for instance) reaches the shared system python3.
-  if ! python3 -m venv --copies "$VENV_DIR"; then
-    log_err "couldn't create the venv — check that your python3 install includes the venv module."
+  if ! "$BASE_PY" -m venv --copies "$VENV_DIR"; then
+    log_err "couldn't create the venv — check that your Python install includes the venv module."
     exit 1
   fi
   log_ok "venv created."
@@ -592,16 +755,16 @@ log_info "installing wrappers into $PREFIX ..."
 mkdir -p "$PREFIX"
 
 for name in "${WRAPPERS[@]}"; do
-  chmod +x "$PLUGINS_DIR/$name"
+  chmod +x "$(wrapper_path "$name")"
   target="$PREFIX/$name"
   # Only overwrite what's already ours (a symlink to this plugins dir, or
   # nothing at all) — never clobber some unrelated file that happens to
   # share the name.
-  if [[ -e "$target" || -L "$target" ]] && [[ "$(readlink "$target" 2>/dev/null)" != "$PLUGINS_DIR/$name" ]]; then
+  if [[ -e "$target" || -L "$target" ]] && [[ "$(readlink "$target" 2>/dev/null)" != "$(wrapper_path "$name")" ]]; then
     log_warn "$target already exists and isn't one of ours — skipping (remove it yourself and re-run to install here)."
     continue
   fi
-  ln -sf "$PLUGINS_DIR/$name" "$target"
+  ln -sf "$(wrapper_path "$name")" "$target"
   log_ok "$name -> $target"
 done
 
@@ -650,7 +813,7 @@ else
         { echo ""; echo "$PATH_LINE"; } >> "$RC_FILE"
       fi
       for name in "${WRAPPERS[@]}"; do
-        alias_line="alias $name=\"$PLUGINS_DIR/$name\"  # added by ztrclient installer"
+        alias_line="alias $name=\"$(wrapper_path "$name")\"  # added by ztrclient installer"
         if ! grep -qxF "$alias_line" "$RC_FILE" 2>/dev/null; then
           echo "$alias_line" >> "$RC_FILE"
         fi
@@ -665,11 +828,78 @@ else
     if [[ "$NEED_PATH" -eq 1 ]]; then
       echo "${C_DIM}    $PATH_LINE${C_RESET}"
       for name in "${WRAPPERS[@]}"; do
-        echo "${C_DIM}    alias $name=\"$PLUGINS_DIR/$name\"${C_RESET}"
+        echo "${C_DIM}    alias $name=\"$(wrapper_path "$name")\"${C_RESET}"
       done
     fi
     [[ "$NEED_VENV_ALIAS" -eq 1 ]] && echo "${C_DIM}    $VENV_ALIAS_LINE${C_RESET}"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Ferry and ZTR Proxy: check what the window needs, then put an app in
+# ~/Applications. Nothing is installed for you here (Tk comes from Homebrew or
+# python.org, not pip) — a missing piece is just named, with the command.
+tk_hint() {
+  log_warn "The Python this installer set up has no Tk 8.6 or newer, which the window needs. With Homebrew:"
+  log_warn "    brew install python-tk@$("$VENV_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  log_warn "(or install Python from python.org, which includes Tk, remove $VENV_DIR and re-run)."
+}
+
+# macOS keeps apps out of Downloads, Desktop and Documents unless you allow it per app, so an
+# app that opens files from there can be refused without a word. Say so up front.
+if [[ "$WITH_FERRY" -eq 1 || "$WITH_PROXY" -eq 1 ]]; then
+  case "$SCRIPT_DIR" in
+    "$HOME/Downloads"/*|"$HOME/Desktop"/*|"$HOME/Documents"/*)
+      log_warn "ztrclient is in $(dirname "${SCRIPT_DIR#$HOME/}" | cut -d/ -f1) — macOS may stop apps opened from Launchpad or Spotlight from reading files there."
+      log_warn "If an app won't open, move this folder somewhere else (for example ~/ztrclient) and run this installer again."
+      ;;
+  esac
+fi
+
+if [[ "$WITH_FERRY" -eq 1 ]]; then
+  log_info "setting up Ferry (the file manager) ..."
+  if py_has_tk "$VENV_PY"; then
+    log_ok "Tk found — Ferry's window will work."
+  else
+    tk_hint
+  fi
+  command -v ssh >/dev/null 2>&1 && log_ok "ssh found." || log_warn "ssh wasn't found — Ferry can't connect without it."
+  if command -v rsync >/dev/null 2>&1; then
+    log_ok "rsync found ($(rsync --version 2>&1 | head -n 1))."
+  else
+    log_warn "rsync wasn't found — Ferry still moves a few small files without it, but folders and larger files need it: brew install rsync"
+  fi
+  if command -v gtar >/dev/null 2>&1; then
+    log_ok "GNU tar (gtar) found — small transfers will take the fast path."
+  else
+    log_info "no GNU tar here — Ferry will use rsync for small transfers too (slower on a slow route, otherwise the same; 'brew install gnu-tar' adds it)."
+  fi
+  FERRY_ICON_TMP="$(mktemp -t ztr_ferry_icon).png"
+  if "$VENV_PY" "$PLUGINS_DIR/ztr_ferry.py" --write-icon "$FERRY_ICON_TMP" && mkdir -p "$APPS_DIR" \
+      && make_app_bundle "$FERRY_APP" "Ferry" "net.ztrelay.ferry" "$PLUGINS_DIR/ztr_ferry" "$FERRY_ICON_TMP" ferry; then
+    log_ok "Ferry added to your Applications ($FERRY_APP)."
+  else
+    log_warn "couldn't create Ferry.app — 'ztr_ferry' still works from a terminal."
+  fi
+  rm -f "$FERRY_ICON_TMP"
+fi
+
+if [[ "$WITH_PROXY" -eq 1 ]]; then
+  log_info "setting up ZTR Proxy (the browser-proxy window) ..."
+  if py_has_tk "$VENV_PY"; then
+    log_ok "Tk found — ZTR Proxy's window will work."
+  else
+    tk_hint
+    log_warn "(the proxy itself still runs without a window: ztr_proxy --cli --config-file NAME.ztr)"
+  fi
+  PROXY_ICON_TMP="$(mktemp -t ztr_proxy_icon).png"
+  if "$VENV_PY" "$PLUGINS_DIR/ztr_proxy/ztr_proxy_gui.py" --write-icon "$PROXY_ICON_TMP" && mkdir -p "$APPS_DIR" \
+      && make_app_bundle "$PROXY_APP" "ZTR Proxy" "net.ztrelay.proxy" "$PLUGINS_DIR/ztr_proxy/ztr_proxy" "$PROXY_ICON_TMP" proxy; then
+    log_ok "ZTR Proxy added to your Applications ($PROXY_APP)."
+  else
+    log_warn "couldn't create ZTR Proxy.app — 'ztr_proxy' still works from a terminal."
+  fi
+  rm -f "$PROXY_ICON_TMP"
 fi
 
 # ---------------------------------------------------------------------------
@@ -837,3 +1067,9 @@ fi
 
 echo
 log_ok "done. Try: ztr_ssh --rh \"example._ztr\" --rp 22"
+if [[ "$WITH_FERRY" -eq 1 ]]; then
+  log_ok "and for the file manager: ztr_ferry   (or open Ferry from your Applications)"
+fi
+if [[ "$WITH_PROXY" -eq 1 ]]; then
+  log_ok "and for the browser proxy: ztr_proxy   (or open ZTR Proxy from your Applications)"
+fi

@@ -292,10 +292,14 @@ ztr_ferry                 # opens Ferry; the terminal comes straight back
 ztr_ferry --foreground    # stay attached to the terminal and show errors live
 ```
 
-With `--with-ferry` the installer also adds Ferry to your applications menu.
-It runs on a Linux desktop and needs Python's tkinter (`sudo apt install
-python3-tk`), `rsync` and `ssh`; GNU `tar` is used for a faster path on small
-transfers when it's there. It needs no pip packages.
+With `--with-ferry` the installer also adds Ferry to your applications menu
+(`Ferry.app` in `~/Applications` on a Mac). It runs on a Linux or macOS
+desktop and needs Python's Tk (Linux: `sudo apt install python3-tk`; macOS:
+a Python with Tk 8.6 or newer, such as `brew install python-tk@3.13`),
+`rsync` and `ssh`; GNU `tar` is used for a faster path on small transfers
+when it's there (on a Mac that is `gtar`, from `brew install gnu-tar`). It
+needs no pip packages. On a Mac the shortcuts use the Command key
+(`⌘T`, `⌘W`, `⌘,`) and the `ztr_ssh` button opens a Terminal window.
 
 **How it connects.** Each tab asks the tunnel service for one session to the
 server and opens a single ssh connection through it. Listings, folder
@@ -305,7 +309,7 @@ or written to disk.
 
 **What it does for you.**
 
-- **Tabs.** One connection per tab (`Ctrl+T` opens one, `Ctrl+W` closes it),
+- **Tabs.** One connection per tab (`Ctrl+T` opens one, `Ctrl+W` closes it; `⌘` on a Mac),
   each with its own queue and log. Saved sites and bookmarks are shared.
 - **Transfers.** Everything goes through a queue you can cancel, retry and
   clear. Queued transfers headed the same way are merged into one rsync, so
@@ -357,10 +361,12 @@ ztr_proxy --cli --config-file NAME.ztr   # no window: run the proxy in this term
 ```
 
 With `--with-proxy` the installer also adds ZTR Proxy to your applications
-menu. The window runs on a Linux desktop and needs Python's tkinter (`sudo apt
-install python3-tk`); `ztr_proxy --cli` needs nothing beyond what the rest of
-the client already uses. The launcher uses the installer's Python environment,
-or any `python3` that has `pycryptodome`; set `ZTR_VENV_DIR` if you put that
+menu (`ZTR Proxy.app` in `~/Applications` on a Mac). The window runs on a
+Linux or macOS desktop and needs Python's Tk (Linux: `sudo apt install
+python3-tk`; macOS: Tk 8.6 or newer, such as `brew install python-tk@3.13`);
+`ztr_proxy --cli` needs nothing beyond what the rest of the client already
+uses. The launcher uses the installer's Python environment, or any Python 3.12
+or newer that has `pycryptodome`; set `ZTR_VENV_DIR` if you put that
 environment somewhere else.
 
 By default it listens on `10.10.15.10` when this computer has that address
@@ -383,8 +389,8 @@ inside it.
   starts at once, and a route card shows each hop's direct round-trip time.
 - **Browser** gives the proxy address (with copy buttons), a connection test,
   and "Open *browser* through ZTR". It lists the browsers it finds — Firefox,
-  Chromium, Chrome, Brave, Edge and Vivaldi, including Snap and Flatpak
-  installs — and opens the one you pick in a separate profile with the proxy
+  Chromium, Chrome, Brave, Edge and Vivaldi (including Snap and Flatpak
+  installs on Linux, and the apps in `/Applications` on a Mac) — and opens the one you pick in a separate profile with the proxy
   set. Two options apply to the browser it opens: quieting the browser's own
   background connections (updates, telemetry and sync checks each open a
   tunnel of their own), and blocking WebRTC, which can reveal your real

@@ -12,7 +12,7 @@
 #
 # Uses the Python environment the installer set up (it holds the one package
 # the proxy needs, pycryptodome); set ZTR_VENV_DIR if you put it elsewhere.
-# Linux only.
+# Works on Linux and macOS.
 set -u -o pipefail
 
 if [[ -t 2 ]]; then
@@ -23,16 +23,39 @@ fi
 log_err()  { echo "${C_ERR}[ztr_proxy] $*${C_RESET}" >&2; }
 log_warn() { echo "${C_WARN}[ztr_proxy]${C_RESET} $*" >&2; }
 
-# Follow the symlink the installer puts in ~/.local/bin back to this folder.
-SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+IS_MAC=0
+[[ "$(uname -s)" == "Darwin" ]] && IS_MAC=1
+
+# Follow the symlink the installer puts in ~/.local/bin back to this folder
+# (readlink -f isn't on every macOS, so walk the links by hand).
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
 HERE="$(cd "$(dirname "$SELF")" && pwd)"
 
-# The installer's own venv first (it always has pycryptodome); otherwise any
-# python3 that already does.
+# The installer's own environment first (it always has pycryptodome); otherwise
+# any python3 that already does. On a Mac a few more places are tried, since
+# the client needs Python 3.12 or newer and the window needs a Tk that is 8.6
+# or newer — which a Mac's default python3 often lacks.
+ok_python() {
+  "$1" -c 'import sys, Crypto; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1
+}
+has_tk() { "$1" -c 'import sys, tkinter; sys.exit(0 if tkinter.TkVersion >= 8.6 else 1)' >/dev/null 2>&1; }
+
+CANDIDATES=("${ZTR_VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}/bin/python3" "$(command -v python3 2>/dev/null || true)")
+if [[ "$IS_MAC" -eq 1 ]]; then
+  CANDIDATES+=(/opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3
+               /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3
+               /Library/Frameworks/Python.framework/Versions/Current/bin/python3)
+fi
 PY=""
-VENV_PY="${ZTR_VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}/bin/python3"
-for candidate in "$VENV_PY" "$(command -v python3 2>/dev/null || true)"; do
-  if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" -c 'import Crypto' >/dev/null 2>&1; then
+for candidate in "${CANDIDATES[@]}"; do
+  if [[ -n "$candidate" && -x "$candidate" ]] && ok_python "$candidate"; then
     PY="$candidate"
     break
   fi
@@ -41,7 +64,7 @@ if [[ -z "$PY" ]]; then
   if ! command -v python3 >/dev/null 2>&1; then
     log_err "python3 not found."
   else
-    log_err "pycryptodome isn't available. Run the ztrclient installer (it sets up the Python environment this needs), or: python3 -m pip install pycryptodome"
+    log_err "No Python 3.12 or newer with pycryptodome was found. Run the ztrclient installer (it sets up the Python environment this needs), or: python3 -m pip install pycryptodome"
   fi
   exit 1
 fi
@@ -51,14 +74,18 @@ if [[ "${1:-}" == "--cli" ]]; then
   exec "$PY" "$HERE/ztr_proxy.py" "$@"
 fi
 
-if ! "$PY" -c 'import tkinter' >/dev/null 2>&1; then
-  log_err "Python's tkinter isn't installed — the window needs it. On Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+if ! has_tk "$PY"; then
+  if [[ "$IS_MAC" -eq 1 ]]; then
+    log_err "This Python has no Tk 8.6 or newer — the window needs it. With Homebrew: brew install python-tk@$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')   (or install Python from python.org, which includes Tk)"
+  else
+    log_err "Python's tkinter isn't installed — the window needs it. On Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+  fi
   log_warn "Without a window you can still run the proxy with: ztr_proxy --cli --config-file NAME.ztr"
   exit 1
 fi
 
-# Started from a plain ssh login there's no display; try the desktop's usual one.
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+# Started from a plain ssh login on Linux there's no display; try the desktop's usual one.
+if [[ "$IS_MAC" -eq 0 && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   export DISPLAY=:0
 fi
 
@@ -67,9 +94,19 @@ if [[ "${1:-}" == "--foreground" ]]; then
   exec "$PY" "$HERE/ztr_proxy_gui.py" "$@"
 fi
 
-LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/proxy.log"
+if [[ "$IS_MAC" -eq 1 ]]; then
+  LOG="$HOME/Library/Logs/ztr/proxy.log"
+else
+  LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/proxy.log"
+fi
 mkdir -p "$(dirname "$LOG")"
-setsid -f "$PY" "$HERE/ztr_proxy_gui.py" "$@" >"$LOG" 2>&1
+# Detach from this terminal: setsid where there is one (Linux), otherwise nohup.
+if command -v setsid >/dev/null 2>&1; then
+  setsid -f "$PY" "$HERE/ztr_proxy_gui.py" "$@" >"$LOG" 2>&1
+else
+  nohup "$PY" "$HERE/ztr_proxy_gui.py" "$@" >"$LOG" 2>&1 </dev/null &
+  disown 2>/dev/null || true
+fi
 
 # A healthy window prints nothing, so anything in the log within the first
 # moments is a startup problem (no display, a missing module, ...).

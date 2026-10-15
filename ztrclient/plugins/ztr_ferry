@@ -7,7 +7,7 @@
 #
 # Like ztr_ssh, this assumes ztr_tunnel_lp.py is already running as a
 # persistent service — Ferry asks it for a tunnel when you click Connect.
-# Linux only.
+# Works on Linux and macOS.
 set -u -o pipefail
 
 if [[ -t 2 ]]; then
@@ -18,35 +18,85 @@ fi
 log_err()  { echo "${C_ERR}[ztr_ferry] $*${C_RESET}" >&2; }
 log_warn() { echo "${C_WARN}[ztr_ferry]${C_RESET} $*" >&2; }
 
-# Follow the symlink the installer puts in ~/.local/bin back to this folder.
-SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+IS_MAC=0
+[[ "$(uname -s)" == "Darwin" ]] && IS_MAC=1
+
+# Follow the symlink the installer puts in ~/.local/bin back to this folder
+# (readlink -f isn't on every macOS, so walk the links by hand).
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *) SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
 FERRY="$(cd "$(dirname "$SELF")" && pwd)/ztr_ferry.py"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  log_err "python3 not found."
-  exit 1
-fi
-if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
-  log_err "Python's tkinter isn't installed — on Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
-  exit 1
+# A Python whose Tk can draw a window. Linux: python3. A Mac's python3 often has
+# none (Apple's has Tk 8.5, Homebrew's ships without Tk), so look at the
+# installer's own environment and the usual places for one that does.
+has_tk() { "$1" -c 'import sys, tkinter; sys.exit(0 if tkinter.TkVersion >= 8.6 else 1)' >/dev/null 2>&1; }
+PY=""
+if [[ "$IS_MAC" -eq 1 ]]; then
+  for candidate in \
+      "${ZTR_VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}/bin/python3" \
+      "$(command -v python3 2>/dev/null || true)" \
+      /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3 \
+      /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3 \
+      /Library/Frameworks/Python.framework/Versions/Current/bin/python3; do
+    if [[ -n "$candidate" && -x "$candidate" ]] && has_tk "$candidate"; then
+      PY="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$PY" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      log_err "python3 not found."
+    else
+      log_err "No Python with Tk 8.6 or newer was found — Ferry needs it for its window."
+      log_warn "With Homebrew: brew install python-tk@$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')   (or install Python from python.org, which includes Tk)"
+    fi
+    exit 1
+  fi
+else
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_err "python3 not found."
+    exit 1
+  fi
+  if ! python3 -c 'import tkinter' >/dev/null 2>&1; then
+    log_err "Python's tkinter isn't installed — on Debian/Ubuntu/Raspberry Pi OS: sudo apt install python3-tk"
+    exit 1
+  fi
+  PY="python3"
 fi
 if ! command -v rsync >/dev/null 2>&1; then
-  log_warn "rsync isn't installed — small files still transfer, folders and larger files need it: sudo apt install rsync"
+  log_warn "rsync isn't installed — small files still transfer, folders and larger files need it: $([[ "$IS_MAC" -eq 1 ]] && echo "brew install rsync" || echo "sudo apt install rsync")"
 fi
 
-# Started from a plain ssh login there's no display; try the desktop's usual one.
-if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+# Started from a plain ssh login on Linux there's no display; try the desktop's usual one.
+if [[ "$IS_MAC" -eq 0 && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
   export DISPLAY=:0
 fi
 
 if [[ "${1:-}" == "--foreground" ]]; then
   shift
-  exec python3 "$FERRY" "$@"
+  exec "$PY" "$FERRY" "$@"
 fi
 
-LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/ferry.log"
+if [[ "$IS_MAC" -eq 1 ]]; then
+  LOG="$HOME/Library/Logs/ztr/ferry.log"
+else
+  LOG="${XDG_STATE_HOME:-$HOME/.local/state}/ztr/ferry.log"
+fi
 mkdir -p "$(dirname "$LOG")"
-setsid -f python3 "$FERRY" "$@" >"$LOG" 2>&1
+# Detach from this terminal: setsid where there is one (Linux), otherwise nohup.
+if command -v setsid >/dev/null 2>&1; then
+  setsid -f "$PY" "$FERRY" "$@" >"$LOG" 2>&1
+else
+  nohup "$PY" "$FERRY" "$@" >"$LOG" 2>&1 </dev/null &
+  disown 2>/dev/null || true
+fi
 
 # A healthy Ferry prints nothing, so anything in the log within the first
 # moments is a startup problem (no display, a missing module, ...).
