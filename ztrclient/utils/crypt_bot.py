@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import secrets
+import stat
 import threading
 from typing import Tuple, Union
 
@@ -170,8 +171,22 @@ class CryptBot:
     def check_keys(self) -> bool:
         return os.path.exists(self.pathPublicKey) and os.path.exists(self.pathPrivateKey)
 
+    def _tighten_private_key(self):
+        """A private key other users can read isn't private, and earlier versions wrote it that way. Takes group and
+        other access away from an existing one. Quietly does nothing when it isn't ours to change (another user owns
+        it), on a platform without these permission bits, or when the path is a link (the target may be shared)."""
+        try:
+            if os.path.islink(self.pathPrivateKey):
+                return
+            mode = stat.S_IMODE(os.stat(self.pathPrivateKey).st_mode)
+            if mode & 0o077:
+                os.chmod(self.pathPrivateKey, mode & 0o700)
+        except OSError:
+            pass
+
     def create_keys(self, rsa_size: int = 2048, reuse: bool = False):
         if self.check_keys() and reuse:
+            self._tighten_private_key()
             return self.load_keys()
 
         # One generator at a time: processes starting together on a fresh
@@ -182,10 +197,11 @@ class CryptBot:
             if fcntl:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             if reuse and self.check_keys():
+                self._tighten_private_key()
                 return self.load_keys()
 
             key = RSA.generate(rsa_size)
-            self._write_atomically(self.pathPrivateKey, key.export_key("PEM"))
+            self._write_atomically(self.pathPrivateKey, key.export_key("PEM"), mode=0o600)
             self._write_atomically(self.pathPublicKey, key.publickey().export_key("PEM"))
 
             self._priv_key = key
@@ -195,10 +211,13 @@ class CryptBot:
             os.close(lock_fd)  # also releases the lock
 
     @staticmethod
-    def _write_atomically(path: str, data: bytes):
+    def _write_atomically(path: str, data: bytes, mode: int = 0o666):
+        """Writes data to a temp file and renames it into place. The file is created with `mode` (less the umask) from
+        the start, so a private key is never readable by others, not even for an instant."""
         tmp_path = f"{path}.{os.getpid()}.tmp"
         try:
-            with open(tmp_path, "wb") as f:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "wb") as f:
                 f.write(data)
             os.replace(tmp_path, path)
         except BaseException:
