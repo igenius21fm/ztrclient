@@ -68,7 +68,7 @@ With no flags, it walks you through everything interactively (see
 [Installer prompts](#installer-prompts) below) — no flags are required for a
 normal install. Under the hood, it:
 
-1. Makes the wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry`, `ztr_proxy`) executable — a zip download
+1. Makes the wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry`, `ztr_proxy`, `ztr_fleet`) executable — a zip download
    or fresh `git clone` doesn't reliably preserve the executable bit.
 2. Creates a dedicated venv (default `~/.local/share/ztr/ztr_venv`) and installs
    `pycryptodome` into it, isolated from your system Python.
@@ -346,6 +346,30 @@ HTTPS passes through untouched — the proxy never sees inside it. See
 [plugins/README.md](ztrclient/plugins/README.md#ztr_proxy--the-browser-proxy)
 for every option and where its settings are kept. Runs on Linux and macOS.
 
+## ZTR Fleet — commands on many servers
+
+`ztr_fleet` runs a command, a script or a file transfer on several servers at
+once, each one reached through its own route. Every server answers as it
+finishes, and you see which ones answered the same way and which didn't. It
+can roll a change out a few servers at a time and stop at the first failure,
+try failed servers again, open a terminal on any one of them, and hand each
+answer to a script of yours (to save the IP addresses a firewall reports, for
+example). A run can repeat on a schedule. `ztr_fleet --gui` opens the window;
+everything it does is also available from the command line.
+
+```bash
+ztr_fleet 'uptime'                            # one command on every server
+ztr_fleet --script deploy.sh --batch 2        # a local script, two servers at a time
+ztr_fleet --put app.conf --to /tmp/           # send a file to every server
+ztr_fleet --shell web1                        # a terminal on one server
+ztr_fleet --gui                               # the same thing in a window
+```
+
+The servers are listed in a small fleet file (`ztr_fleet --example` prints a
+sample). It rides on the same tunnel service as `ztr_ssh` and needs key login
+to the servers. See [plugins/ztr_fleet/README.md](ztrclient/plugins/ztr_fleet/README.md)
+for everything it can do.
+
 ## Troubleshooting
 
 ### Installing
@@ -503,7 +527,8 @@ configs in it are left alone.
   `route.ztr` exists at all, so it works standalone, without the installer.
 - `plugins/` — `ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry` (the Ferry
   file manager's launcher, with `ztr_ferry.py` behind it), `ztr_proxy/` (the
-  browser proxy and its window, launched with `ztr_proxy`), `ztr_tunnel_lp.py`
+  browser proxy and its window, launched with `ztr_proxy`), `ztr_fleet/` (run
+  things on many servers, launched with `ztr_fleet`), `ztr_tunnel_lp.py`
   (the persistent tunnel service target), and `ztr_dashboard.py` (the local
   tunnel/traffic dashboard) with its `static/` folder (plain CSS/JS, no
   build step). See [plugins/README.md](ztrclient/plugins/README.md) for what each one

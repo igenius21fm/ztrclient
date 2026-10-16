@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ztr_fleet — run a command, a script or a file transfer on several servers at
+# once, each through its own ZTRelay route.
+#
+#   ztr_fleet 'uptime'                         one command on every server
+#   ztr_fleet --script deploy.sh --batch 2     a local script, two servers at a time, stopping if one fails
+#   ztr_fleet --put app.conf --to /tmp/        send a file to every server
+#   ztr_fleet --get /var/log/syslog --into logs   a file back from every server
+#   ztr_fleet --shell web1                     a terminal on one server
+#   ztr_fleet --check                          look over the fleet file; connect to nothing
+#   ztr_fleet --gui                            the same thing in a window
+#   ztr_fleet --help                           every option
+#
+# The servers are listed in a fleet file (ztr_fleet --example shows the format):
+# ./fleet.conf if it exists, otherwise ~/.config/ztr_fleet/fleet.conf.
+#
+# This is only the launcher. The work is done by ztr_fleet_core.py (the command
+# line) and ztr_fleet_gui.py (the window), which sit next to it. Works on Linux
+# and macOS.
+set -u
+
+# Follow the symlink the installer puts in ~/.local/bin back to this folder.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+
+if [[ -t 2 ]]; then C_ERR=$'\033[0;31m'; C_RESET=$'\033[0m'; else C_ERR=""; C_RESET=""; fi
+log_err() { echo "${C_ERR}[ztr_fleet] $*${C_RESET}" >&2; }
+
+# The installer's own Python environment first, then python3.
+PY=""
+for candidate in "${ZTR_VENV_DIR:-$HOME/.local/share/ztr/ztr_venv}/bin/python3" "$(command -v python3 2>/dev/null || true)"; do
+  [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1 && { PY="$candidate"; break; }
+done
+[[ -n "$PY" ]] || { log_err "python3 (3.8 or newer) wasn't found"; exit 2; }
+
+# --gui: the window, which needs a Python with Tk 8.6 or newer.
+GUI=0; FILE_ARG=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --gui) GUI=1 ;;
+    --file) FILE_ARG=(--file "${args[$((i + 1))]:-}") ;;
+  esac
+done
+if [[ "$GUI" -eq 1 ]]; then
+  has_tk() { "$1" -c 'import sys, tkinter; sys.exit(0 if tkinter.TkVersion >= 8.6 else 1)' >/dev/null 2>&1; }
+  GUI_PY=""
+  for candidate in "$PY" python3 python3.14 python3.13 python3.12 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
+      /opt/homebrew/bin/python3.14 /usr/local/bin/python3 /Library/Frameworks/Python.framework/Versions/Current/bin/python3; do
+    found="$(command -v "$candidate" 2>/dev/null || true)"
+    [[ -n "$found" ]] && has_tk "$found" && { GUI_PY="$found"; break; }
+  done
+  if [[ -z "$GUI_PY" ]]; then
+    log_err "the window needs a Python with Tk 8.6 or newer — Linux: sudo apt install python3-tk; macOS: brew install python-tk@3.13"
+    exit 2
+  fi
+  [[ "$(uname -s)" != "Darwin" && -z "${DISPLAY:-}" ]] && export DISPLAY=:0
+  exec "$GUI_PY" "$HERE/ztr_fleet_gui.py" ${FILE_ARG[@]+"${FILE_ARG[@]}"}
+fi
+
+exec "$PY" "$HERE/ztr_fleet_core.py" "$@"

@@ -3,7 +3,8 @@
 Everything here builds on `ztrClient.py` (one directory up). Three thin CLI
 wrappers — `ztr_ssh`, `ztr_forward`, `ztr_pg` — drive tunnels through a
 shared background service, `ztr_tunnel_lp.py`, and so does Ferry
-(`ztr_ferry.py`), a desktop file manager; `ztr_dashboard.py` and
+(`ztr_ferry.py`), a desktop file manager, and ZTR Fleet (`ztr_fleet/`), which
+runs commands, scripts and file transfers on several servers at once; `ztr_dashboard.py` and
 `ztr_requests/` are separate, standalone tools with no dependency on that
 service. `ztr_https.py` is a library the others (and your own scripts) can
 import — not something you run on its own.
@@ -410,6 +411,31 @@ inside it.
 `~/.config/ztr_proxy/` (`ZTR_PROXY_HOME` moves them). The window's log is at
 `~/.local/state/ztr/proxy.log` while it runs from the launcher.
 
+## ztr_fleet/ — run things on many servers
+
+Runs a command, a script or a file transfer on several servers at once, each
+through its own route, with a command line and a window.
+
+```bash
+ztr_fleet 'uptime'                            # one command on every server
+ztr_fleet --group web 'df -h /'               # only the servers in a group
+ztr_fleet --script deploy.sh --batch 2 --canary   # one server first, then two at a time
+ztr_fleet --put app.conf --to /tmp/           # send a file to every server
+ztr_fleet --get /var/log/syslog --into logs   # fetch a file from every server
+ztr_fleet --shell web1                        # a terminal on one server
+ztr_fleet --gui                               # the window
+```
+
+The servers are listed in `fleet.conf` (`ztr_fleet --example` prints a
+sample): a name, the route file, the alias, the ssh user and port, and optional
+`group=`, `key=` and variables a command can use as `{name}`. It uses the
+tunnel service the other wrappers use, and ssh key login to the servers. It can
+roll out in batches that stop at the first failure, retry failed servers, ask
+before a destructive command, send a sudo password once over ssh, give each
+answer to a local script (**hooks**), and repeat a run on a schedule. The
+window adds Compare (which servers answered differently), History, a hook
+manager and a Schedules tab. See [ztr_fleet/README.md](ztr_fleet/README.md).
+
 ## Layout
 
 - `ztr_tunnel_lp.py` — the shared tunnel service every wrapper below talks to.
@@ -418,6 +444,9 @@ inside it.
 - `ztr_proxy/` — the browser proxy: `ztr_proxy` (launcher), `ztr_proxy.py`
   (the proxy), `ztr_proxy_gui.py` (the window) and `ztr_proxy_guard.py`
   (blocklist, alert list and detection rules).
+- `ztr_fleet/` — run things on many servers: `ztr_fleet` (launcher),
+  `ztr_fleet_core.py` (the command line and the engine) and `ztr_fleet_gui.py`
+  (the window).
 - `ztr_dashboard.py` + `static/` — the standalone local dashboard.
 - `ztr_https.py` — HTTP(S)-over-tunnel client library.
 - `ztr_requests/` — the standalone request-composer web UI, built on it.
