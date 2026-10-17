@@ -92,7 +92,17 @@ tunnel service the other wrappers rely on.
 | `--no-warm-pool` | don't prepare tunnels ahead of time |
 | `--warm-max-age SECONDS` | how long a ready tunnel may wait unused (default 150) |
 | `--warm-min-uses N` | prepare a tunnel for a host once it has been asked for N times within a minute (default 2) |
+| `--idle-timeout SECONDS` | close a connection that has sent nothing, either way, for this many seconds (0 = never, the default; otherwise at least 10) |
 | `--with-timing-defense` | turn on the hops' own jitter and decoy traffic for every tunnel this proxy opens |
+
+Browsers keep a connection open for a while after you close the page that
+used it, and each one holds a tunnel through your route until it is closed. With
+`--idle-timeout` (or **Settings → Close idle connections after**) the proxy closes a
+connection that has been quiet for that long; the browser just opens a new one
+when it needs it. It is off by default, because anything that sits quiet on
+purpose — an ssh session, a chat page — would be cut too. The Connections tab
+shows how long each connection has been idle, and **Close idle** closes every
+connection that has been quiet for 30 seconds.
 
 Setting up a tunnel takes a moment, so after a host has been used the proxy
 prepares a spare one in the background. The next connection to that host then

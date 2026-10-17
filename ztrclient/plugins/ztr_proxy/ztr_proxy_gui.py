@@ -51,6 +51,7 @@ HOP_PORT = 3478
 DEFAULT_SETTINGS = {
     "route": "", "port": ztr_proxy.DEFAULT_PORT, "host": "", "warm": True, "min_uses": ztr_proxy.WARM_MIN_USES,
     "max_age": ztr_proxy.WARM_MAX_AGE, "timing": False, "autostart": False, "pinned": [], "quiet": True, "webrtc": True,
+    "idle": 0,  # seconds a connection may sit quiet before it is closed; 0 = never
 }
 
 BG, CARD, FIELD, BORDER = "#1c1c1e", "#262629", "#1a1a1c", "#3a3a3d"
@@ -1670,7 +1671,8 @@ def build_app():
             Check(bar, text="Only problems", variable=self.only_problems).grid(row=0, column=2, padx=(14, 0))
             self.close_btn = Btn(bar, text="Close connection", style="Danger.TButton", command=self.close_selected, state="disabled")
             self.close_btn.grid(row=0, column=3, padx=(14, 0))
-            Btn(bar, text="Clear history", style="Ghost.TButton", command=self.clear_history).grid(row=0, column=4, padx=(8, 0))
+            Btn(bar, text="Close idle", style="Ghost.TButton", command=self.close_idle_now).grid(row=0, column=4, padx=(8, 0))
+            Btn(bar, text="Clear history", style="Ghost.TButton", command=self.clear_history).grid(row=0, column=5, padx=(8, 0))
             cols = [("time", "Time"), ("kind", "Type"), ("host", "Host"), ("tunnel", "Tunnel"), ("setup", "Wait"),
                     ("up", "Sent"), ("down", "Received"), ("state", "State")]
             frame, self.conn_tree = make_tree(f, cols, (80, 80, 360, 80, 80, 90, 100, 150), height=14,
@@ -2301,7 +2303,7 @@ def build_app():
             service = ztr_proxy.ProxyService(
                 s["route"], host=(s.get("host") or None), port=int(s["port"]), warm_pool=bool(s["warm"]),
                 warm_max_age=float(s["max_age"]), warm_min_uses=int(s["min_uses"]), timing_defense=bool(s["timing"]),
-                pinned=[tuple(p) for p in s.get("pinned", [])])
+                pinned=[tuple(p) for p in s.get("pinned", [])], idle_timeout=int(s.get("idle") or 0))
 
             def work():
                 try:
@@ -2613,13 +2615,14 @@ def build_app():
                 if c["state"] == "opening":
                     state, tags = f"opening {fmt_elapsed(now - c['started'])}", ("dim",)
                 elif c["state"] == "open":
-                    state, tags = f"open {fmt_elapsed(now - c['started'])}", ("open",)
+                    quiet = now - c.get("last_active", now)
+                    state, tags = f"open {fmt_elapsed(now - c['started'])}" + (f" · idle {fmt_elapsed(quiet)}" if c["kind"] != "HTTP" and quiet >= 15 else ""), ("open",)
                 elif failed:
                     state, tags = "failed", ("failed",)
                 elif c["state"] == "blocked":
                     state, tags = "blocked", ("blocked",)
                 else:
-                    state = (f"HTTP {c['status']}" if c.get("status") else "closed") + f" · {fmt_elapsed((c['ended'] or now) - c['started'])}"
+                    state = (f"HTTP {c['status']}" if c.get("status") else ("closed (idle)" if c.get("idle_closed") else "closed")) + f" · {fmt_elapsed((c['ended'] or now) - c['started'])}"
                     tags = ()
                 tunnel = "—" if c["kind"] == "HTTP" else ("ready" if c["warm"] else "new") if c["setup"] is not None else "…"
                 host = f"{c['host']}:{c['port']}" if c["kind"] != "HTTP" else c["host"] + (f"  {c['detail'].split(' ', 1)[1][:40]}" if c["detail"] else "")
@@ -2752,6 +2755,12 @@ def build_app():
             sel = self.conn_tree.selection()
             if sel and self.tele.close_connection(int(sel[0][1:])):
                 self.toast("Connection closed", "info", 1500)
+
+        IDLE_NOW_SECONDS = 30  # what "Close idle" counts as idle
+
+        def close_idle_now(self):
+            n = self.tele.close_idle(self.IDLE_NOW_SECONDS)
+            self.toast(f"Closed {n} idle connection{'s' if n != 1 else ''}" if n else f"Nothing has been idle for {self.IDLE_NOW_SECONDS} seconds", "info", 2000)
 
         def clear_history(self):
             with self.tele._lock:
@@ -3002,6 +3011,7 @@ def build_app():
             age = tk.StringVar(value=str(int(s["max_age"])))
             timing = tk.BooleanVar(value=bool(s["timing"]))
             auto = tk.BooleanVar(value=bool(s["autostart"]))
+            idle = tk.StringVar(value=(str(int(s["idle"]) // 60) if int(s.get("idle") or 0) % 60 == 0 else str(round(int(s["idle"]) / 60, 1))) if s.get("idle") else "0")
             ttk.Label(body, text="Settings", style="H.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
 
             def section(row, text):
@@ -3024,25 +3034,36 @@ def build_app():
             Field(body, compact=True, textvariable=uses, width=5).grid(row=8, column=1, sticky="w", pady=(12, 0))
             ttk.Label(body, text="Keep a ready tunnel for (seconds)").grid(row=9, column=0, sticky="w", padx=(0, 16), pady=(10, 0))
             Field(body, compact=True, textvariable=age, width=5).grid(row=9, column=1, sticky="w", pady=(10, 0))
-            section(10, "Privacy")
-            Check(body, text="Timing defense", variable=timing).grid(row=11, column=0, columnspan=2, sticky="w")
-            hint(12, "The hops add random delays and decoy traffic to every tunnel, which makes traffic harder to match up — and slower.", indent=True)
-            section(13, "Window")
-            Check(body, text="Start the proxy when this window opens", variable=auto).grid(row=14, column=0, columnspan=2, sticky="w")
+            section(10, "Connections")
+            ttk.Label(body, text="Close idle connections after (minutes)").grid(row=11, column=0, sticky="w", padx=(0, 16))
+            Field(body, compact=True, textvariable=idle, width=5).grid(row=11, column=1, sticky="w")
+            hint(12, "0 means never. Your browser keeps connections open after you close a page, and each one holds a tunnel through your route. "
+                     "A quiet connection is closed and simply opened again when needed — but anything that sits quiet on purpose, like an ssh session, would be cut too.")
+            section(13, "Privacy")
+            Check(body, text="Timing defense", variable=timing).grid(row=14, column=0, columnspan=2, sticky="w")
+            hint(15, "The hops add random delays and decoy traffic to every tunnel, which makes traffic harder to match up — and slower.", indent=True)
+            section(16, "Window")
+            Check(body, text="Start the proxy when this window opens", variable=auto).grid(row=17, column=0, columnspan=2, sticky="w")
             note = ttk.Label(body, text="", style="Dim.TLabel")
-            note.grid(row=15, column=0, columnspan=2, sticky="w", pady=(12, 0))
+            note.grid(row=18, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
             def done():
                 try:
+                    idle_seconds = int(round(float(idle.get().strip() or "0") * 60))
                     new = dict(s, port=int(port.get()), host=host.get().strip(), warm=warm.get(), min_uses=max(1, int(uses.get())),
-                               max_age=max(20, float(age.get())), timing=timing.get(), autostart=auto.get())
+                               max_age=max(20, float(age.get())), timing=timing.get(), autostart=auto.get(), idle=idle_seconds)
                     if not 1 <= new["port"] <= 65535:
                         raise ValueError
+                    if idle_seconds < 0 or 0 < idle_seconds < ztr_proxy.MIN_IDLE_TIMEOUT:
+                        note.configure(text=f"Idle time must be 0 (never) or at least {ztr_proxy.MIN_IDLE_TIMEOUT} seconds (0.2 minutes).", foreground=RED)
+                        return
                 except ValueError:
-                    note.configure(text="The port, visits and seconds need to be numbers.", foreground=RED)
+                    note.configure(text="The port, visits, seconds and minutes need to be numbers.", foreground=RED)
                     return
                 changed = any(new[k] != s[k] for k in ("port", "host", "warm", "min_uses", "max_age", "timing"))
                 s.update(new)
+                if self.service is not None:  # the idle time applies at once, no restart needed
+                    self.service.idle_timeout = int(new["idle"])
                 save_settings(s)
                 self.settings_win = None
                 win.destroy()
@@ -3050,7 +3071,7 @@ def build_app():
                 if changed and self.state == "running":
                     self.toast("Restarting the proxy to apply the changes…", "info")
                     self.restart()
-            Btn(body, text="Done", style="Primary.TButton", command=done).grid(row=16, column=0, columnspan=2, sticky="e", pady=(18, 0))
+            Btn(body, text="Done", style="Primary.TButton", command=done).grid(row=19, column=0, columnspan=2, sticky="e", pady=(18, 0))
             win.bind("<Escape>", lambda e: (setattr(self, "settings_win", None), win.destroy()))
             win.bind("<Return>", lambda e: done())
             win.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, "settings_win", None), win.destroy()))

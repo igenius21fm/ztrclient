@@ -108,6 +108,7 @@ WARM_MAX_TARGETS = 16   # how many different targets keep a spare at once
 # reused: asked for at least WARM_MIN_USES times within WARM_REPEAT_WINDOW seconds, or one whose spare was just used.
 WARM_MIN_USES = 2
 WARM_REPEAT_WINDOW = 60
+MIN_IDLE_TIMEOUT = 10   # the shortest idle timeout that may be set (0 means never)
 # Pinned targets (see ProxySession.pin) are renewed once their spare has used this share of its allowed age.
 PIN_RENEW_AT = 0.7
 PIN_CHECK_EVERY = 5  # seconds
@@ -157,7 +158,7 @@ class Telemetry:
             cid = next(self._ids)
             record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "state": "opening",
                       "started": time.time(), "setup": None, "warm": False, "up": 0, "down": 0,
-                      "status": None, "error": None, "ended": None}
+                      "status": None, "error": None, "ended": None, "last_active": time.time(), "idle_closed": False}
             self.active[cid] = record
             self.counters["connections"] += 1
             snapshot = dict(record)
@@ -186,7 +187,7 @@ class Telemetry:
             c = self.active.get(cid)
             if c is None:
                 return
-            c.update(state="open", setup=setup, warm=bool(warm))
+            c.update(state="open", setup=setup, warm=bool(warm), last_active=time.time())
             h = self.hosts.setdefault(c["host"], {"host": c["host"], "count": 0, "warm": 0, "setup_total": 0.0, "setup_n": 0,
                                                    "up": 0, "down": 0, "last": 0.0, "failed": 0})
             h["count"] += 1
@@ -221,6 +222,8 @@ class Telemetry:
             if c is not None:
                 c["up"] += up
                 c["down"] += down
+                if up or down:
+                    c["last_active"] = time.time()
                 h = self.hosts.get(c["host"])
                 if h is not None:
                     h["up"] += up
@@ -256,6 +259,25 @@ class Telemetry:
         except OSError:
             pass
         return True
+
+    def close_idle(self, seconds):
+        """Cuts every open tunnel connection that has moved no bytes, either way, for at least `seconds`. The browser
+        simply opens a new one when it next needs it. Returns how many were closed."""
+        now = time.time()
+        victims = []
+        with self._lock:
+            for cid, c in self.active.items():
+                fn = self._closers.get(cid)
+                if fn is not None and c["state"] == "open" and now - c["last_active"] >= seconds:
+                    c["idle_closed"] = True
+                    victims.append((c["host"], c["port"], now - c["last_active"], fn))
+        for host, port, idle, fn in victims:
+            try:
+                fn()
+            except OSError:
+                pass
+            self.log(f"closed {host}:{port}: nothing sent for {int(idle)}s")
+        return len(victims)
 
     def close_all(self):
         with self._lock:
@@ -997,8 +1019,10 @@ class ProxyService:
     line. start() raises OSError if the address is taken."""
 
     def __init__(self, config_file, host=None, port=DEFAULT_PORT, warm_pool=True, warm_max_age=WARM_MAX_AGE,
-                 warm_min_uses=WARM_MIN_USES, timing_defense=False, pinned=(), telemetry=None, session_factory=None):
+                 warm_min_uses=WARM_MIN_USES, timing_defense=False, pinned=(), telemetry=None, session_factory=None,
+                 idle_timeout=0):
         self.config_file, self.host_arg, self.port = config_file, host, int(port)
+        self.idle_timeout = idle_timeout  # seconds without traffic before a connection is closed; 0 = never. May be changed while running.
         self.warm_pool, self.warm_max_age, self.warm_min_uses = warm_pool, warm_max_age, warm_min_uses
         self.timing_defense, self.initial_pins = timing_defense, list(pinned)
         self.telemetry = telemetry or TELEMETRY
@@ -1042,6 +1066,8 @@ class ProxyService:
     def _sample(self):
         while not self._stop.wait(1.0):
             self.telemetry.sample()
+            if self.idle_timeout and self.idle_timeout > 0:
+                self.telemetry.close_idle(self.idle_timeout)
             GUARD.sweep(self.telemetry.snapshot_active())
             GUARD.save()
 
@@ -1070,8 +1096,11 @@ def main():
     parser.add_argument("--no-warm-pool", action="store_true", help="don't keep a ready tunnel per target (by default one is authorized in the background after each connection, so the next one to the same host starts instantly)")
     parser.add_argument("--warm-max-age", type=float, default=WARM_MAX_AGE, help=f"seconds a ready tunnel may wait unused before it's discarded (default: {WARM_MAX_AGE})")
     parser.add_argument("--warm-min-uses", type=int, default=WARM_MIN_USES, help=f"a ready tunnel is prepared for a host once it has been asked for this many times within {WARM_REPEAT_WINDOW}s — 1 prepares one after every connection, higher spares the route's hops the work for hosts you only touch once (default: {WARM_MIN_USES})")
+    parser.add_argument("--idle-timeout", type=int, default=0, metavar="SECONDS", help=f"close a connection that has sent nothing, either way, for this many seconds — Firefox keeps connections open after you close a page, and each one holds a tunnel through your route until it is closed (0 = never, the default; otherwise at least {MIN_IDLE_TIMEOUT}). A closed connection is simply opened again when needed; anything that sits quiet on purpose (an ssh session, a chat page) would be cut too, so leave it off for those")
     parser.add_argument("--keep-ready", action="append", default=[], metavar="HOST[:PORT]", help="keep a ready tunnel to this host at all times (repeatable; port defaults to 443)")
     args = parser.parse_args()
+    if args.idle_timeout and args.idle_timeout < MIN_IDLE_TIMEOUT:
+        parser.error(f"--idle-timeout must be 0 (never) or at least {MIN_IDLE_TIMEOUT} seconds")
     pins = []
     for item in args.keep_ready:
         name, _, port = item.partition(":")
@@ -1082,7 +1111,7 @@ def main():
 
     service = ProxyService(args.config_file, host=host, port=args.port, warm_pool=not args.no_warm_pool,
                            warm_max_age=args.warm_max_age, warm_min_uses=args.warm_min_uses,
-                           timing_defense=args.with_timing_defense, pinned=pins)
+                           timing_defense=args.with_timing_defense, pinned=pins, idle_timeout=args.idle_timeout)
     service.start()
     print(f"ztr_proxy listening on {service.host}:{service.port} — HTTP proxy: -x http://{service.host}:{service.port}   "
           f"SOCKS5: --socks5-hostname {service.host}:{service.port}")
