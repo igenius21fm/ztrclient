@@ -549,3 +549,9 @@ configs in it are left alone.
 Reference target/client apps built on this client — an HTTP proxy, a video
 streamer, an async drop-box, and a worker pool — live in
 [ztrapps](https://github.com/igenius21fm/ztrapps).
+
+## License
+
+ztrclient is released under the [Apache License 2.0](LICENSE). Third-party
+components bundled here keep their own licenses; see [NOTICE](NOTICE). The
+ZTRelay service itself is governed by its [Terms of Service](https://ztrelay.net/terms).
