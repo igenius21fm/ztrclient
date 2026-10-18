@@ -78,6 +78,19 @@ tunnel service the other wrappers rely on.
   more data sent than received, bursts of random-looking names, remote-access
   ports, direct-to-address connections and repeated failures; every alert shows
   the evidence behind it, and a host you recognise can be marked trusted.
+- **Rules** say what to do when a host name contains some text: block it, alert
+  you, or trust it. `tracker` matches `ad-tracker.net` and `tracker.example.com`;
+  the text needs at least three characters. As you type, the page shows which
+  of the hosts seen so far the rule would have matched. A rule can also match a
+  name and everything under it, or an address or range, like the Blocklist
+  entries. Everything on the Blocklist, Alert list and Trusted tabs is listed on
+  this page too, and if several rules match, Block wins. In the entry boxes the
+  same rule is written `contains:tracker`.
+- **Hide names** (the button in the top bar) shows host names and addresses
+  abbreviated everywhere in the window, like `w•••.e•••.com` and
+  `203.•••.•••.•••`, so a screen share or a photo of the screen doesn't show what
+  you visit. It changes only what is displayed: filters and the Copy buttons
+  still use the real names, and traffic is untouched.
 - **Log** shows what the proxy is doing, as it happens.
 
 ## Command-line options

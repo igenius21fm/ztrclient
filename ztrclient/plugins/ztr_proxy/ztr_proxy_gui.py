@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
     "route": "", "port": ztr_proxy.DEFAULT_PORT, "host": "", "warm": True, "min_uses": ztr_proxy.WARM_MIN_USES,
     "max_age": ztr_proxy.WARM_MAX_AGE, "timing": False, "autostart": False, "pinned": [], "quiet": True, "webrtc": True,
     "idle": 0,  # seconds a connection may sit quiet before it is closed; 0 = never
+    "mask": False,  # show host names and addresses abbreviated on screen
 }
 
 BG, CARD, FIELD, BORDER = "#1c1c1e", "#262629", "#1a1a1c", "#3a3a3d"
@@ -59,6 +60,41 @@ TEXT, DIM = "#f2f2f7", "#8e8e93"
 CYAN, PURPLE, GREEN, RED, AMBER = "#0a84ff", "#bf5af2", "#30d158", "#ff453a", "#ffb340"
 SEL, ZEBRA = "#0a64d6", "#1f1f21"
 TEAL = "#64d2ff"
+
+
+# ── hiding names on screen ───────────────────────────────────────────────────
+# A privacy switch for the window only: host names and addresses are shown abbreviated (w•••.e•••.com, 203.•••.•••.•••)
+# in every list, detail line, alert, log line and message, so a screen share or a photo of the screen doesn't show what
+# is being visited. Nothing else changes: filters, copy buttons and the lists themselves still use the real names.
+
+MASK = {"on": False}
+_NOT_HOSTS = {"ztr", "json", "py", "pem", "txt", "png", "log", "db", "conf", "sh", "md", "html", "js", "css", "desktop", "cfg", "ini", "sig"}
+_HOST_TOKEN = re.compile(r"(?<![\w.@-])(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?\.)+[A-Za-z]{2,24}(?![\w-])")
+_IPV4_TOKEN = re.compile(r"(?<![\w.])(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\w.])")
+_CONTAINS_TOKEN = re.compile(r"(contains:)([A-Za-z0-9_.-]+)")
+_DOTS = "\u2022\u2022\u2022"
+
+
+def mask_word(word):
+    return (word[:1] + _DOTS) if word else word
+
+
+def _mask_host_token(match):
+    token = match.group(0)
+    labels = token.split(".")
+    if labels[-1].lower() in _NOT_HOSTS:
+        return token
+    return ".".join(mask_word(label) for label in labels[:-1]) + "." + labels[-1]
+
+
+def mask_text(text):
+    """`text` with host names, addresses and contains-rules abbreviated, when the switch is on."""
+    if not MASK["on"] or not text:
+        return text
+    text = str(text)
+    text = _IPV4_TOKEN.sub(lambda m: f"{m.group(1)}.{_DOTS}.{_DOTS}.{_DOTS}", text)
+    text = _CONTAINS_TOKEN.sub(lambda m: m.group(1) + mask_word(m.group(2)), text)
+    return _HOST_TOKEN.sub(_mask_host_token, text)
 
 
 # ── settings ─────────────────────────────────────────────────────────────────
@@ -1359,6 +1395,8 @@ def build_app():
     def sync_tree(tree, rows):
         """Makes the tree show `rows` ([(iid, values, tags)], in order) touching as little as possible, so selection,
         scroll position and hover survive a refresh every half second."""
+        if MASK["on"]:
+            rows = [(iid, tuple(mask_text(v) if isinstance(v, str) else v for v in values), tags) for iid, values, tags in rows]
         have = list(tree.get_children())
         want = [r[0] for r in rows]
         for iid in have:
@@ -1399,11 +1437,12 @@ def build_app():
     # ── the window ───────────────────────────────────────────────────────────────
 
     class App:
-        PAGES = [("overview", "Overview"), ("connections", "Connections"), ("hosts", "Hosts"), ("alerts", "Alerts"), ("blocklist", "Blocklist"), ("browser", "Browser"), ("log", "Log")]
+        PAGES = [("overview", "Overview"), ("connections", "Connections"), ("hosts", "Hosts"), ("alerts", "Alerts"), ("rules", "Rules"), ("blocklist", "Blocklist"), ("browser", "Browser"), ("log", "Log")]
 
         def __init__(self, root, route=None, autostart=False):
             self.root = root
             self.settings = load_settings()
+            MASK["on"] = bool(self.settings.get("mask"))
             if route:
                 self.settings["route"] = route
             self.tele = ztr_proxy.TELEMETRY
@@ -1527,7 +1566,9 @@ def build_app():
             self.state_label.grid(row=0, column=1)
             self.toggle_btn = Btn(head, text="Start proxy", command=self.toggle, style="Primary.TButton")
             self.toggle_btn.grid(row=0, column=2, padx=(0, 10))
-            GearBtn(head, command=self.open_settings).grid(row=0, column=3)
+            self.mask_btn = Btn(head, text="Show names" if MASK["on"] else "Hide names", style="Ghost.TButton", command=self.toggle_mask)
+            self.mask_btn.grid(row=0, column=3, padx=(0, 6))
+            GearBtn(head, command=self.open_settings).grid(row=0, column=4)
 
             # the route: which one, and what is between you and the internet
             self.route_card = Card(page, radius=14, pad=(16, 12))
@@ -1567,6 +1608,7 @@ def build_app():
             self._build_connections(self.pages["connections"])
             self._build_hosts(self.pages["hosts"])
             self._build_alerts(self.pages["alerts"])
+            self._build_rules(self.pages["rules"])
             self._build_blocklist(self.pages["blocklist"])
             self._build_browser(self.pages["browser"])
             self._build_log(self.pages["log"])
@@ -1585,9 +1627,20 @@ def build_app():
                 b.configure(selected=(k == key))
             self._refresh_page(force=True)
 
+        def toggle_mask(self):
+            MASK["on"] = not MASK["on"]
+            self.settings["mask"] = MASK["on"]
+            save_settings(self.settings)
+            self.mask_btn.configure(text="Show names" if MASK["on"] else "Hide names")
+            self.rebuild_log()
+            self._refresh_page(force=True)
+            if self.page == "connections":
+                self._conn_selected()
+            self.toast("Host names are hidden on screen" if MASK["on"] else "Host names are showing again", "info", 1800)
+
         def toast(self, text, kind="info", ms=3200):
             colors = {"info": TEXT, "ok": GREEN, "error": RED, "warn": AMBER}
-            self.toast_label.configure(text=text, fg=colors.get(kind, TEXT))
+            self.toast_label.configure(text=mask_text(text), fg=colors.get(kind, TEXT))
             self.toast_label.place(relx=0.5, rely=1.0, anchor="s", y=-18)
             self.toast_label.lift()
             if self.toast_job:
@@ -1983,8 +2036,8 @@ def build_app():
                 for b in self.act.values():
                     b.configure(state="disabled")
                 return
-            self.alert_title.configure(text=f"{a['severity'].title()} · {a['title']}")
-            self.alert_evidence.configure(text=a["evidence"])
+            self.alert_title.configure(text=mask_text(f"{a['severity'].title()} · {a['title']}"))
+            self.alert_evidence.configure(text=mask_text(a["evidence"]))
             tail = f"First seen {fmt_clock(a['first'])}, last {fmt_clock(a['last'])}, {a['count']} time{'s' if a['count'] != 1 else ''}."
             if a["action"]:
                 tail += f" The host was {a['action']}."
@@ -2123,7 +2176,7 @@ def build_app():
             bar.columnconfigure(5, weight=1)
             self.list_entry = tk.StringVar()
             self.list_note = tk.StringVar()
-            fe = Field(bar, compact=True, textvariable=self.list_entry, width=30, placeholder="host, host:port, address or range")
+            fe = Field(bar, compact=True, textvariable=self.list_entry, width=30, placeholder="host, host:port, address, range or contains:text")
             fe.grid(row=0, column=0, sticky="w")
             fe.inner.bind("<Return>", lambda e: self.add_list_entry())
             Field(bar, compact=True, textvariable=self.list_note, width=22, placeholder="note (optional)").grid(row=0, column=1, padx=(8, 0))
@@ -2255,6 +2308,161 @@ def build_app():
                     self.toast(f"Exported {len(self.current_set().entries)} entries", "ok")
                 except OSError as e:
                     self.toast(f"Couldn't export: {e}", "error")
+
+        # ── rules: when a host contains something, do something ──────────
+        RULE_MATCHES = [("contains", "contains"), ("is or under", "is (or is under)"), ("address", "is an address or range")]
+        RULE_ACTIONS = ["Block", "Alert", "Trust"]
+        RULES_BLURB = ("A rule says: when a host name contains some text, block it, alert you, or trust it. Blocked hosts are refused before any "
+                       "tunnel opens; alerts and trust work as on the Alert list and Trusted tabs. Everything you add on those tabs shows here too. "
+                       "If several rules match, Block wins.")
+
+        def _build_rules(self, f):
+            f.columnconfigure(0, weight=1)
+            f.rowconfigure(3, weight=1)
+            ttk.Label(f, text=self.RULES_BLURB, style="BgDim.TLabel", wraplength=1040, justify="left").grid(row=0, column=0, sticky="w", pady=(0, 10))
+            bar = ttk.Frame(f)
+            bar.grid(row=1, column=0, sticky="ew")
+            ttk.Label(bar, text="When the host", style="BgDim.TLabel").grid(row=0, column=0, padx=(0, 8))
+            self.rule_match = tk.StringVar(value=self.RULE_MATCHES[0][1])
+            Combo(bar, compact=True, textvariable=self.rule_match, state="readonly", width=20,
+                  values=[label for _k, label in self.RULE_MATCHES]).grid(row=0, column=1)
+            self.rule_text = tk.StringVar()
+            fe = Field(bar, compact=True, textvariable=self.rule_text, width=26, placeholder="text, e.g. tracker")
+            fe.grid(row=0, column=2, padx=(8, 0))
+            fe.inner.bind("<Return>", lambda e: self.add_rule())
+            ttk.Label(bar, text="then", style="BgDim.TLabel").grid(row=0, column=3, padx=(12, 8))
+            self.rule_action = tk.StringVar(value="Block")
+            Combo(bar, compact=True, textvariable=self.rule_action, state="readonly", width=7, values=self.RULE_ACTIONS).grid(row=0, column=4)
+            self.rule_sev = tk.StringVar(value="medium")
+            self.rule_sev_box = Combo(bar, compact=True, textvariable=self.rule_sev, state="readonly", width=8, values=["high", "medium", "low", "info"])
+            self.rule_sev_box.grid(row=0, column=5, padx=(8, 0))
+            self.rule_note = tk.StringVar()
+            Field(bar, compact=True, textvariable=self.rule_note, width=18, placeholder="note (optional)").grid(row=0, column=6, padx=(8, 0))
+            Btn(bar, text="Add rule", style="Primary.TButton", command=self.add_rule).grid(row=0, column=7, padx=(8, 0))
+            self.rule_preview = ttk.Label(f, text=" ", style="BgDim.TLabel", wraplength=1040, justify="left")
+            self.rule_preview.grid(row=2, column=0, sticky="w", pady=(8, 10))
+            cols = [("when", "When the host"), ("action", "Then"), ("sev", "Severity"), ("note", "Note"), ("hits", "Matches"), ("last", "Last match"), ("added", "Added")]
+            frame, self.rule_tree = make_tree(f, cols, (300, 70, 80, 240, 80, 100, 130), height=12, anchors={"hits": "e"}, stretch="note")
+            frame.grid(row=3, column=0, sticky="nsew")
+            self.rule_hint = tk.Label(frame, text="", bg=FIELD, fg=DIM, font=UI["body"], justify="center")
+            below = ttk.Frame(f)
+            below.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+            self.rule_remove_btn = Btn(below, text="Remove rule", style="Danger.TButton", command=self.remove_rule, state="disabled")
+            self.rule_remove_btn.grid(row=0, column=0)
+            self.rule_tree.bind("<<TreeviewSelect>>", lambda e: self.rule_remove_btn.configure(state="normal" if self.rule_tree.selection() else "disabled"))
+            self.rule_tree.bind("<Delete>", lambda e: self.remove_rule())
+            for var in (self.rule_match, self.rule_text, self.rule_action):
+                var.trace_add("write", lambda *a: self.update_rule_preview())
+            self.update_rule_preview()
+
+        def _rule_pattern_text(self):
+            kind = next((k for k, label in self.RULE_MATCHES if label == self.rule_match.get()), "contains")
+            text = self.rule_text.get().strip()
+            if kind == "contains":
+                return ztr_proxy_guard.CONTAINS_PREFIX + text.lower() if text else ""
+            return text
+
+        def rule_when(self, pattern):
+            try:
+                p = ztr_proxy_guard.parse_pattern(pattern)
+            except ValueError:
+                return pattern
+            port = f" on port {p.port}" if p.port else ""
+            if p.kind == "contains":
+                return f'contains "{mask_word(p.value) if MASK["on"] else p.value}"'
+            if p.kind == "domain":
+                return f"is {p.value} or under it{port}"
+            if p.kind == "ip":
+                return f"is the address {p.value}{port}"
+            return f"is in the range {p.value}"
+
+        def update_rule_preview(self):
+            self.rule_sev_box.grid() if self.rule_action.get() == "Alert" else self.rule_sev_box.grid_remove()
+            text = self._rule_pattern_text()
+            if not text:
+                self.rule_preview.configure(text="Type the text to look for. It is matched against the host name, so tracker matches ad-tracker.net and tracker.example.com.", foreground=DIM)
+                return
+            try:
+                pat = ztr_proxy_guard.parse_pattern(text)
+            except ValueError as e:
+                self.rule_preview.configure(text=str(e)[:1].upper() + str(e)[1:] + ".", foreground=AMBER)
+                return
+            seen = sorted({h["host"] for h in self.snap.get("hosts", [])})
+            hit = [h for h in seen if pat.matches(h, 0)]
+            if not seen:
+                msg = "Nothing has connected yet, so there is nothing to compare this rule with."
+                colour = DIM
+            elif not hit:
+                msg = f"It would not have matched any of the {len(seen)} hosts seen so far."
+                colour = DIM
+            else:
+                names = ", ".join(hit[:4]) + (f" and {len(hit) - 4} more" if len(hit) > 4 else "")
+                msg = f"It would have matched {len(hit)} of the {len(seen)} hosts seen so far: {names}."
+                colour = AMBER if (self.rule_action.get() == "Block" and len(seen) >= 6 and len(hit) * 2 > len(seen)) else TEXT
+                if colour == AMBER:
+                    msg += " That is most of what you visit."
+            self.rule_preview.configure(text=mask_text(msg), foreground=colour)
+
+        def add_rule(self):
+            text = self._rule_pattern_text()
+            if not text:
+                return
+            g, action, note = ztr_proxy.GUARD, self.rule_action.get(), self.rule_note.get().strip()
+            try:
+                ztr_proxy_guard.parse_pattern(text)
+                if action == "Block":
+                    self.block_host(text, note=note)
+                elif action == "Alert":
+                    g.watch(text, severity=self.rule_sev.get(), note=note)
+                    self.toast(f"Rule added: alert when the host {self.rule_when(text)}", "ok", 2400)
+                else:
+                    g.trust(text, note=note)
+                    self.toast(f"Rule added: trust when the host {self.rule_when(text)}", "ok", 2400)
+            except ValueError as e:
+                self.toast(f"That rule can't be added: {e}", "warn")
+                return
+            self.save_guard()
+            self.rule_text.set("")
+            self.rule_note.set("")
+            self.refresh_rules()
+
+        def refresh_rules(self):
+            g = ztr_proxy.GUARD
+            rows = []
+            order = 0
+            for action, store, tag in (("Block", g.blocklist, "blocked"), ("Alert", g.watchlist, "warm"), ("Trust", g.trusted, "open")):
+                for e in sorted(store.entries.values(), key=lambda e: -e.get("added", 0))[:800]:
+                    pattern = e["pattern"]
+                    hits = g.hits.get(pattern, 0) if action != "Trust" else 0
+                    last = g.last_hit.get(pattern)
+                    rows.append((f"{action}|{pattern}",
+                                 (self.rule_when(pattern), action, e.get("severity", "") if action == "Alert" else "", e.get("note", ""), hits or "",
+                                  fmt_clock(last) if last else "", time.strftime("%Y-%m-%d %H:%M", time.localtime(e["added"])) if e.get("added") else ""),
+                                 (tag,) + (("odd",) if order % 2 else ())))
+                    order += 1
+            sel = self.rule_tree.selection()
+            sync_tree(self.rule_tree, rows)
+            if sel and sel[0] in self.rule_tree.get_children():
+                self.rule_tree.selection_set(sel)
+            if rows:
+                self.rule_hint.place_forget()
+            else:
+                self.rule_hint.configure(text="No rules yet.\nTry: when the host contains tracker, then Block.")
+                self.rule_hint.place(relx=0.5, rely=0.4, anchor="center")
+            self.update_rule_preview()
+
+        def remove_rule(self):
+            sel = self.rule_tree.selection()
+            if not sel:
+                return
+            g = ztr_proxy.GUARD
+            undo = {"Block": g.unblock, "Alert": g.unwatch, "Trust": g.untrust}
+            for iid in sel:
+                action, _sep, pattern = iid.partition("|")
+                undo[action](pattern)
+            self.save_guard()
+            self.toast("Rule removed" if len(sel) == 1 else f"{len(sel)} rules removed", "info", 1800)
+            self.refresh_rules()
 
         # ── blocking, from anywhere in the window ────────────────────────
         def save_guard(self):
@@ -2545,6 +2753,8 @@ def build_app():
                 self.refresh_hosts()
             elif page == "alerts":
                 self.refresh_alerts()
+            elif page == "rules":
+                self.refresh_rules()
             elif page == "blocklist":
                 self.refresh_blocklist()
             elif page == "browser":
@@ -2670,7 +2880,7 @@ def build_app():
                 bits.append(f"Refused before any tunnel was opened — it matches your blocklist entry {c['error'].split(': ', 1)[-1]}.")
             elif c["error"]:
                 bits.append(f"Failed: {c['error']}")
-            self.detail_label.configure(text="\n".join(bits), foreground=AMBER if c["state"] == "blocked" else (RED if c["error"] else TEXT))
+            self.detail_label.configure(text=mask_text("\n".join(bits)), foreground=AMBER if c["state"] == "blocked" else (RED if c["error"] else TEXT))
 
         def popup(self, tree, menu, event):
             row = tree.identify_row(event.y)
@@ -2959,7 +3169,7 @@ def build_app():
                 if level not in wanted:
                     continue
                 self.log_text.insert("end", fmt_clock(ts) + "  ", "time")
-                self.log_text.insert("end", text.replace("\n", " ") + "\n", level)
+                self.log_text.insert("end", mask_text(text.replace("\n", " ")) + "\n", level)
             if int(self.log_text.index("end-1c").split(".")[0]) > 1500:
                 self.log_text.delete("1.0", "300.0")
             if at_end:

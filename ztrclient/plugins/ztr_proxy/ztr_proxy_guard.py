@@ -20,7 +20,8 @@ marked trusted, which silences the rules for it (a blocklist or alert-list
 entry still applies).
 
 Blocklist and alert-list patterns:  example.com  (that name and everything
-under it), example.com:8443 (one port only), 203.0.113.9, 203.0.113.0/24.
+under it), example.com:8443 (one port only), 203.0.113.9, 203.0.113.0/24, and
+contains:text (any host whose name has that text in it, e.g. contains:tracker).
 Names are never looked up on this computer, so an address entry only matches
 when a program connects to that bare address.
 """
@@ -104,15 +105,22 @@ def fmt_span(seconds):
 _HOST_RE = re.compile(r"^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$")
 
 
+CONTAINS_PREFIX = "contains:"
+CONTAINS_MIN = 3            # shorter text would match far too much ("ad" is in "adobe", "gadget", "paid"...)
+_CONTAINS_RE = re.compile(r"^[a-z0-9_.-]+$")
+
+
 class Pattern:
-    """One blocklist / alert-list entry: a name (covering everything under it), an address, or an address range,
-    optionally limited to one port."""
+    """One blocklist / alert-list entry: a name (covering everything under it), an address, an address range, or text
+    that a host name contains; all but the last may be limited to one port."""
 
     def __init__(self, kind, value, port=None):
         self.kind, self.value, self.port = kind, value, port
 
     @property
     def text(self):
+        if self.kind == "contains":
+            return CONTAINS_PREFIX + self.value
         base = str(self.value)
         return f"{base}:{self.port}" if self.port else base
 
@@ -120,6 +128,8 @@ class Pattern:
         if self.port and self.port != port:
             return False
         host = (host or "").lower().rstrip(".")
+        if self.kind == "contains":
+            return self.value in host
         if self.kind == "domain":
             return host == self.value or host.endswith("." + self.value)
         try:
@@ -136,6 +146,13 @@ def parse_pattern(text):
     t = (text or "").strip().lower()
     if not t:
         raise ValueError("empty")
+    if t.startswith(CONTAINS_PREFIX):
+        value = t[len(CONTAINS_PREFIX):].strip()
+        if len(value) < CONTAINS_MIN:
+            raise ValueError(f"the text to look for needs at least {CONTAINS_MIN} characters")
+        if len(value) > 100 or not _CONTAINS_RE.match(value):
+            raise ValueError("the text to look for can only use letters, digits, dots, dashes and underscores")
+        return Pattern("contains", value)
     t = re.sub(r"^[a-z][a-z0-9+.-]*://", "", t)
     t = re.split(r"[/?#]", t, maxsplit=1)[0] if not re.fullmatch(r"[0-9a-f:.]+/\d{1,3}", t) else t
     t = t.rsplit("@", 1)[-1]
@@ -205,6 +222,7 @@ class PatternSet:
         self.entries = {}
         self._domains = {}      # name -> entry, no port limit
         self._ported = []       # (Pattern, entry) with a port, or an address
+        self._contains = []     # (text, entry): any host name that has the text in it
         for entry in entries:
             self.add(entry, rebuild=False)
 
@@ -212,7 +230,9 @@ class PatternSet:
         pat = parse_pattern(entry["pattern"])
         entry = dict(entry, pattern=pat.text)
         self.entries[pat.text] = entry
-        if pat.kind == "domain" and pat.port is None:
+        if pat.kind == "contains":
+            self._contains = [(v, e) for v, e in self._contains if v != pat.value] + [(pat.value, entry)]
+        elif pat.kind == "domain" and pat.port is None:
             self._domains[pat.value] = entry
         else:
             self._ported = [(p, e) for p, e in self._ported if p.text != pat.text] + [(pat, entry)]
@@ -221,6 +241,8 @@ class PatternSet:
     def remove(self, text):
         pat = parse_pattern(text)
         gone = self.entries.pop(pat.text, None)
+        if pat.kind == "contains":
+            self._contains = [(v, e) for v, e in self._contains if v != pat.value]
         self._domains.pop(pat.value, None) if pat.kind == "domain" and pat.port is None else None
         self._ported = [(p, e) for p, e in self._ported if p.text != pat.text]
         return gone is not None
@@ -234,6 +256,9 @@ class PatternSet:
                 return hit
         for pat, entry in self._ported:
             if pat.matches(host, port):
+                return entry
+        for text, entry in self._contains:
+            if text in host:
                 return entry
         return None
 
