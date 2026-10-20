@@ -668,6 +668,8 @@ def build_app():
         return Field(parent, combo=True, **kw)
 
 
+    ROW_CHARS = 40   # how much of "route · user@alias" fits on one line of the server list
+
     _flag_cache = {}
 
     def flag_image(code):
@@ -1328,11 +1330,25 @@ def build_app():
                 g = Glyph(row, state, size=16)
                 g.grid(row=0, column=2, sticky="e", padx=(6, 4))
                 flag = flag_image(route_country(s.route))
-                sub = "%s  ·  %s@%s" % (s.route if flag else route_label(s.route), s.user, s.alias if len(s.alias) < 26 else s.alias[:12] + "…" + s.alias[-10:])
+                # one line that always fits the list: "route · user@alias", the alias shortened in the middle when it is long
+                # (a line wider than the list would be cut off at both ends, and a flag at its left end with it)
+                head = s.route if flag else route_label(s.route)
+                tail = "%s@%s" % (s.user, s.alias)
+                room = max(16, ROW_CHARS - len(head) - 5)
+                if len(tail) > room:
+                    alias_room = room - len(s.user) - 1      # keep the user whole and shorten the alias from its middle
+                    if alias_room >= 6:
+                        keep = alias_room - 1
+                        tail = "%s@%s" % (s.user, s.alias[:keep // 2 + keep % 2] + "…" + s.alias[len(s.alias) - keep // 2:])
+                    else:
+                        keep = room - 1
+                        tail = tail[:keep // 2 + keep % 2] + "…" + tail[len(tail) - keep // 2:]
+                sub = "%s  ·  %s" % (head, tail)
                 if s.vars:
                     extra = format_vars(s.vars)
-                    sub += "  ·  " + (extra if len(extra) < 30 else extra[:28] + "…")
-                tk.Label(row, text=(" " + sub) if flag else sub, image=flag or "", compound="left", bg=CARD, fg=DIM, font=UI["tiny"]).grid(
+                    if len(sub) + 5 + len(extra) <= ROW_CHARS:
+                        sub += "  ·  " + extra
+                tk.Label(row, text=(" " + sub) if flag else sub, image=flag or "", compound="left", anchor="w", bg=CARD, fg=DIM, font=UI["tiny"]).grid(
                     row=1, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(0, 4))
                 for w in (row,) + tuple(row.winfo_children()):
                     if w.winfo_class() != "Canvas":
