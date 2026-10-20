@@ -41,7 +41,7 @@ from ztr_fleet_core import (  # noqa: E402
     norm_hook, hook_title, hook_wanted, fix_executable, scan_hooks_folder, create_hook, run_hook, HOOK_TEMPLATES,
     run_summary_hook, summary_payload, collect_followups, followup_targets, load_saved_jobs, save_saved_jobs, norm_saved_job,
     saved_job_problems, saved_job_servers, describe_schedule, norm_schedule, install_schedule, remove_schedule, schedule_status,
-    schedule_available, DAYS, DEFAULT_OPTS)
+    schedule_available, DAYS, DEFAULT_OPTS, job_log_path)
 
 APP_NAME = "ZTR Fleet"
 
@@ -2664,17 +2664,58 @@ def build_app():
                 where = "every server" if j["all"] else ", ".join(j["servers"] + (["group " + j["group"]] if j["group"] else []))
                 ttk.Label(b, text="on %s%s" % (where, "  ·  hands answers to your switched-on hooks" if j["hooks"] == "saved" else ""), style="Dim.TLabel").grid(row=3, column=0, sticky="w")
                 last = self.last_scheduled_run(j["name"])
-                ttk.Label(b, text=("Last run %s  ·  %s" % last[:2]) if last else "Hasn't run yet", style="Dim.TLabel", foreground=(GREEN if last[2] else AMBER) if last else DIM).grid(row=4, column=0, sticky="w")
+                problem = st.get("problem") or ""
+                if problem:  # switched on, but the system can't start it: say so instead of "hasn't run yet"
+                    tk.Label(b, text=problem, bg=CARD, fg=AMBER, font=UI["small"], justify="left", anchor="w", wraplength=520).grid(row=4, column=0, sticky="w", pady=(6, 0))
+                if last:
+                    ttk.Label(b, text="Last run %s  ·  %s" % last[:2], style="Dim.TLabel", foreground=GREEN if last[2] else AMBER).grid(row=5, column=0, sticky="w")
+                elif st.get("runs"):
+                    ttk.Label(b, text="Started %d time%s, but no run has finished yet%s" % (st["runs"], "" if st["runs"] == 1 else "s", " — see the Log" if st.get("log") else ""),
+                              style="Dim.TLabel", foreground=AMBER if problem or st.get("log") else DIM).grid(row=5, column=0, sticky="w")
+                elif not problem:
+                    ttk.Label(b, text="Hasn't run yet", style="Dim.TLabel", foreground=DIM).grid(row=5, column=0, sticky="w")
                 btns = ttk.Frame(b, style="Card.TFrame")
-                btns.grid(row=0, column=1, rowspan=5, sticky="ne")
+                btns.grid(row=0, column=1, rowspan=6, sticky="ne")
                 Btn(btns, text="Run now", style="Small.TButton", command=lambda j=j: self.run_saved_now(j)).grid(row=0, column=0, padx=(0, 6), pady=(0, 6))
                 Btn(btns, text="Edit…", style="Small.TButton", command=lambda j=j: self.schedule_dialog(j)).grid(row=0, column=1, padx=(0, 6), pady=(0, 6))
                 Btn(btns, text="Resume" if not st["active"] else "Pause", style="Small.TButton", command=lambda j=j, a=st["active"]: self.toggle_job(j, not a)).grid(row=1, column=0, padx=(0, 6))
                 Btn(btns, text="Load in composer", style="Small.TButton", command=lambda j=j: self.load_job_into_composer(j)).grid(row=1, column=1, padx=(0, 6))
                 Btn(btns, text="Delete", style="Small.TButton", command=lambda j=j: self.delete_job(j)).grid(row=1, column=2)
+                if st.get("log"):
+                    Btn(btns, text="Log", style="Small.TButton", command=lambda j=j: self.show_job_log(j)).grid(row=0, column=2, pady=(0, 6))
             if sys.platform != "darwin" and not self.demo:
                 tk.Label(inner, text="On Linux a schedule runs while you are logged in. To keep it running after you log out: loginctl enable-linger $USER",
                          bg=CARD, fg=DIM, font=UI["small"], justify="left", anchor="w", wraplength=560).grid(row=row, column=0, sticky="w", pady=(4, 0))
+
+        def show_job_log(self, j):
+            """A window with the end of a scheduled job's log (macOS keeps one per job; launchd keeps nothing itself)."""
+            path = job_log_path(j["name"])
+            try:
+                lines = path.read_text(errors="replace").splitlines()[-300:]
+            except OSError:
+                lines = []
+            text = "\n".join(lines) or "(nothing has been written yet)"
+            win, body = _dialog(self.root, "Log of " + j["name"])
+            body.columnconfigure(0, weight=1)
+            ttk.Label(body, text="%s  ·  the newest %d line%s" % (j["name"], len(lines), "" if len(lines) == 1 else "s"), style="H.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(body, text=str(path), style="Dim.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 8))
+            holder = tk.Frame(body, bg=FIELD, bd=0, highlightthickness=1, highlightbackground=BORDER)
+            holder.grid(row=2, column=0, sticky="ew")
+            holder.columnconfigure(0, weight=1)
+            box = tk.Text(holder, width=100, height=18, bg=FIELD, fg="#d7d7dc", bd=0, highlightthickness=0, wrap="none", font=UI["mono"], padx=10, pady=8, selectbackground=SEL)
+            ys = ttk.Scrollbar(holder, orient="vertical", command=box.yview, style="Thin.Vertical.TScrollbar")
+            box.configure(yscrollcommand=ys.set)
+            box.insert("1.0", text)
+            box.see("end")
+            box.configure(state="disabled")
+            box.grid(row=0, column=0, sticky="ew")
+            ys.grid(row=0, column=1, sticky="ns")
+            row = ttk.Frame(body, style="Card.TFrame")
+            row.grid(row=3, column=0, sticky="e", pady=(14, 0))
+            Btn(row, text="Copy", style="Small.TButton", command=lambda: self.copy(text, "Log copied")).grid(row=0, column=0, padx=(0, 6))
+            Btn(row, text="Close", style="Primary.TButton", command=win.destroy).grid(row=0, column=1)
+            win.bind("<Escape>", lambda e: win.destroy())
+            _show_modal(win, self.root)
 
         def persist_jobs(self):
             try:

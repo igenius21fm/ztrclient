@@ -1126,6 +1126,84 @@ def unit_slug(name):
     return "ztr-fleet-" + re.sub(r"[^A-Za-z0-9_-]", "-", name)
 
 
+def launchd_label(name):
+    return "com.ztrelay.fleet." + re.sub(r"[^A-Za-z0-9_-]", "-", name)
+
+
+def job_log_path(name):
+    """Where a scheduled job's output goes on macOS (launchd keeps nothing by itself)."""
+    return CONFIG_DIR / "logs" / (re.sub(r"[^A-Za-z0-9_-]", "-", name) + ".log")
+
+
+LOG_KEEP_BYTES = 128 * 1024
+LOG_TRIM_ABOVE = 512 * 1024
+
+
+def trim_log(path):
+    """Keeps a job's log from growing for ever: past 512 KB only the newest 128 KB stay."""
+    try:
+        if not path or os.path.getsize(path) <= LOG_TRIM_ABOVE:
+            return
+        with open(path, "r+b") as f:
+            f.seek(-LOG_KEEP_BYTES, os.SEEK_END)
+            tail = f.read()
+            tail = tail[tail.find(b"\n") + 1:]
+            f.seek(0)
+            f.write(tail)
+            f.truncate()
+    except OSError:
+        pass
+
+
+# macOS keeps background jobs (anything launchd starts) out of these folders unless the program has been given access
+# in System Settings, so a schedule whose files live there is stopped before it starts ("Operation not permitted").
+MAC_PROTECTED = ("Downloads", "Desktop", "Documents")
+
+
+def macos_blocked_folder(path):
+    """The protected folder (Downloads, Desktop, Documents, iCloud Drive) `path` is inside, or None. macOS only."""
+    if sys.platform != "darwin" or not path:
+        return None
+    try:
+        p = Path(path).expanduser().resolve()
+        home = Path.home().resolve()
+    except OSError:
+        return None
+    for name in MAC_PROTECTED:
+        try:
+            p.relative_to(home / name)
+            return name
+        except ValueError:
+            pass
+    try:
+        p.relative_to(home / "Library" / "Mobile Documents")
+        return "iCloud Drive"
+    except ValueError:
+        return None
+
+
+def blocked_client_message(folder):
+    return ("macOS doesn't let background jobs read your %s folder, so a schedule can't start from here: ZTR Fleet is in %s. "
+            "Move the client folder out of Downloads, Desktop and Documents (for example to ~/ztrclient) and set the schedule again."
+            % (folder, folder))
+
+
+def schedule_problem(j):
+    """A sentence saying why this job's schedule can't run on this computer, or None. Only macOS has such a case: a
+    background job can't read Downloads, Desktop or Documents."""
+    if sys.platform != "darwin":
+        return None
+    folder = macos_blocked_folder(LAUNCHER)
+    if folder:
+        return blocked_client_message(folder)
+    for what, path in (("the fleet file", j.get("file")), ("the script", j.get("script") if j.get("mode") == "script" else None)):
+        folder = macos_blocked_folder(path)
+        if folder:
+            return ("%s (%s) is in your %s folder, which macOS doesn't let background jobs read. Move it somewhere else, such as your "
+                    "home folder, and save the job again." % (what[0].upper() + what[1:], path, folder))
+    return None
+
+
 def timer_files(j, launcher=None):
     """(the .service text, the .timer text) that run a saved job on its schedule — a systemd user timer."""
     launcher = str(launcher or LAUNCHER)
@@ -1141,10 +1219,16 @@ def launchd_plist(j, launcher=None):
     """The launchd agent (macOS) that runs a saved job on its schedule."""
     import plistlib
     sc = norm_schedule(j["sched"])
-    plist = dict(Label="com.ztrelay.fleet." + re.sub(r"[^A-Za-z0-9_-]", "-", j["name"]), ProgramArguments=[str(launcher or LAUNCHER), "--run-job", j["name"]],
-                 RunAtLoad=False)
+    log = str(job_log_path(j["name"]))
+    plist = dict(Label=launchd_label(j["name"]), ProgramArguments=[str(launcher or LAUNCHER), "--run-job", j["name"]],
+                 RunAtLoad=False, StandardOutPath=log, StandardErrorPath=log)
+    home = str(Path.home())
+    # launchd starts jobs with only /usr/bin:/bin:/usr/sbin:/sbin, which has neither Homebrew nor ~/.local/bin
+    env = dict(PATH=":".join([home + "/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
+               ZTR_FLEET_LOG=log)
     if CONFIG_DIR != Path.home() / ".config" / "ztr_fleet":
-        plist["EnvironmentVariables"] = dict(ZTR_FLEET_HOME=str(CONFIG_DIR))
+        env["ZTR_FLEET_HOME"] = str(CONFIG_DIR)
+    plist["EnvironmentVariables"] = env
     if sc["kind"] == "every":
         plist["StartInterval"] = sc["minutes"] * 60
     else:
@@ -1164,7 +1248,10 @@ def _systemctl(*args):
 def schedule_available():
     """None when this computer can run scheduled jobs, else a sentence saying why not."""
     if sys.platform == "darwin":
-        return None if shutil.which("launchctl") else "launchctl wasn't found."
+        if not shutil.which("launchctl"):
+            return "launchctl wasn't found."
+        folder = macos_blocked_folder(LAUNCHER)
+        return blocked_client_message(folder) if folder else None
     if not shutil.which("systemctl"):
         return "Scheduling needs systemd (systemctl wasn't found)."
     try:
@@ -1178,7 +1265,11 @@ def install_schedule(j):
     """Turns a saved job's schedule on. Returns (True, message) or (False, why not)."""
     try:
         if sys.platform == "darwin":
+            why = schedule_problem(j)
+            if why:
+                return False, why
             LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
+            job_log_path(j["name"]).parent.mkdir(parents=True, exist_ok=True)
             path = LAUNCHD_DIR / ("com.ztrelay.fleet.%s.plist" % re.sub(r"[^A-Za-z0-9_-]", "-", j["name"]))
             path.write_bytes(launchd_plist(j))
             subprocess.run(["launchctl", "bootout", "gui/%d" % os.getuid(), str(path)], capture_output=True)
@@ -1212,13 +1303,50 @@ def remove_schedule(name):
         return False
 
 
+def _launchd_state(name):
+    """(runs, last exit code or None) from launchd for a job's agent, or None when it isn't loaded."""
+    r = subprocess.run(["launchctl", "print", "gui/%d/%s" % (os.getuid(), launchd_label(name))], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return None
+    runs = re.search(r"\bruns = (\d+)", r.stdout)
+    code = re.search(r"last exit code = (-?\d+)", r.stdout)
+    return (int(runs.group(1)) if runs else 0), (int(code.group(1)) if code else None)
+
+
+def start_problem(name, runs, code):
+    """A sentence for a macOS job that launchd started but that never got going, or None."""
+    if not runs or code not in (126, 127):
+        return None
+    try:
+        log = job_log_path(name).read_text(errors="replace")[-4000:]
+    except OSError:
+        log = ""
+    folder = macos_blocked_folder(LAUNCHER)
+    if folder or "Operation not permitted" in log:
+        return ("macOS stopped it before it started (exit %d). Background jobs can't read your %s folder, and ZTR Fleet is there. "
+                "Move the client folder out of Downloads, Desktop and Documents (for example to ~/ztrclient) and set the schedule again."
+                % (code, folder or "Downloads, Desktop or Documents"))
+    if code == 127:
+        return "It couldn't start: a command it needs wasn't found (exit 127). The log shows which."
+    return "It couldn't start (exit 126, usually a permissions problem). The log shows the reason."
+
+
 def schedule_status(name):
-    """dict(active, next, last) for a job's timer — next and last are 'YYYY-MM-DD HH:MM' or ''."""
-    out = dict(active=False, next="", last="")
+    """dict(active, next, last, problem, runs, log) for a job's timer — next and last are 'YYYY-MM-DD HH:MM' or ''.
+    `problem` is a sentence when the schedule is on but can't get going (macOS), else ''."""
+    out = dict(active=False, next="", last="", problem="", runs=0, log="")
     try:
         if sys.platform == "darwin":
             path = LAUNCHD_DIR / ("com.ztrelay.fleet.%s.plist" % re.sub(r"[^A-Za-z0-9_-]", "-", name))
             out["active"] = path.is_file()
+            out["log"] = str(job_log_path(name)) if job_log_path(name).is_file() else ""
+            if out["active"]:
+                state = _launchd_state(name)
+                if state is None:
+                    out["problem"] = "The schedule file is there but launchd hasn't loaded it. Pause the job and resume it."
+                else:
+                    out["runs"] = state[0]
+                    out["problem"] = start_problem(name, state[0], state[1]) or ""
             return out
         code, text = _systemctl("show", unit_slug(name) + ".timer", "-p", "ActiveState", "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec")
     except (OSError, subprocess.TimeoutExpired):
@@ -1403,9 +1531,12 @@ def cli(argv=None):
             print("%-20s %-6s %s%s  →  %s" % (j["name"], "on" if st["active"] else "off", describe_schedule(j["sched"]),
                                               ("  (next %s)" % st["next"]) if st["next"] else "",
                                               j["command"] if j["mode"] == "cmd" else "script " + os.path.basename(j["script"])))
+            if st.get("problem"):
+                print("    ! %s" % st["problem"])
         return 0
     saved_spec = None
     if args.run_job:
+        trim_log(os.environ.get("ZTR_FLEET_LOG"))
         if command or args.script or args.put or args.get or args.shell or args.check:
             _err("--run-job runs a saved job on its own; don't give a command or other mode with it")
             return 2

@@ -143,7 +143,14 @@ delete each one. A scheduled run goes to your switched-on hooks like any other
 run, and its answers are kept in History.
 
 On Linux a schedule is a systemd user timer, which runs while you are logged
-in; `loginctl enable-linger $USER` keeps it running after you log out. A
+in; `loginctl enable-linger $USER` keeps it running after you log out.
+On macOS a schedule is a launchd agent, and macOS keeps background jobs out of
+your Downloads, Desktop and Documents folders. If the client (or the fleet file
+or script a job uses) is in one of them, Fleet says so and won't switch the
+schedule on; keep the client somewhere else, for example `~/ztrclient`. Each
+job's output goes to `~/.config/ztr_fleet/logs/NAME.log` (the Schedules tab has a
+**Log** button), and a schedule that is on but can't start says why instead of
+"Hasn't run yet". A
 scheduled run can't ask for a sudo password, so use passwordless sudo for
 those, and a destructive command is confirmed once, when you save the job.
 `ztr_fleet --list-jobs` lists the saved jobs and `ztr_fleet --run-job NAME`
