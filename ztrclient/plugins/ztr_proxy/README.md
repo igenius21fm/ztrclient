@@ -86,6 +86,9 @@ tunnel service the other wrappers rely on.
   entries. Everything on the Blocklist, Alert list and Trusted tabs is listed on
   this page too, and if several rules match, Block wins. In the entry boxes the
   same rule is written `contains:tracker`.
+- **Route names show the country.** If a route's `.ztr` has an `exit_country`
+  (newer downloads do), the route list reads `US  ·  route.ztr` and the exit hop
+  on the route card is labelled `Exit · US`.
 - **Hide names** (the button in the top bar) shows host names and addresses
   abbreviated everywhere in the window, like `w•••.e•••.com` and
   `203.•••.•••.•••`, so a screen share or a photo of the screen doesn't show what

@@ -286,7 +286,8 @@ computer on the left, the server on the right. Connect once, then browse,
 drag files across (or double-click them), rename, delete, change permissions,
 search, and open a server file in your editor — saving it uploads it again.
 It needs the tunnel service (`ztr_tunnel_lp.py`) to be running, the same as
-`ztr_ssh` does.
+`ztr_ssh` does. A route whose `.ztr` has an `exit_country` shows it in the Route
+list and in the "Connected" bar (`US  ·  route.ztr`).
 
 ```bash
 ztr_ferry                 # opens Ferry; the terminal comes straight back

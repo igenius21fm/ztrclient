@@ -127,6 +127,31 @@ def list_routes():
         return []
 
 
+_ROUTE_COUNTRY = {}
+
+
+def route_country(name):
+    """The two-letter code a route's .ztr gives as `exit_country` (the country its exit is in), or ''. Cached per file."""
+    try:
+        path = ROUTES_DIR / name
+        stamp = path.stat().st_mtime
+        hit = _ROUTE_COUNTRY.get(name)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        value = json.loads(path.read_text()).get("exit_country")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    code = value.upper() if isinstance(value, str) and re.fullmatch(r"[A-Za-z]{2}", value) else ""
+    _ROUTE_COUNTRY[name] = (stamp, code)
+    return code
+
+
+def route_label(name):
+    """A route's name for a list: 'US  ·  route.ztr', unless the file name already starts with the country (US_3b983776.ztr)."""
+    code = route_country(name) if name else ""
+    return f"{code}  ·  {name}" if code and not name.upper().startswith(code + "_") else name
+
+
 def route_chain(name):
     """The hops of a route as [(role, address)], from its .ztr file — nothing else in the file is read."""
     try:
@@ -1577,10 +1602,13 @@ def build_app():
             rb.columnconfigure(0, weight=0)
             rb.columnconfigure(2, weight=1)
             ttk.Label(rb, text="ROUTE", style="Dim.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
-            self.route_var = tk.StringVar(value=self.settings.get("route", ""))
-            self.route_combo = Combo(rb, compact=True, textvariable=self.route_var, state="readonly", width=22, values=list_routes())
+            self.route_var = tk.StringVar(value=self.settings.get("route", ""))   # the route's file name, what the rest of the window uses
+            self.route_text = tk.StringVar(value=route_label(self.route_var.get()))   # what the dropdown shows: 'US  ·  route.ztr'
+            self.route_var.trace_add("write", lambda *a: self.route_text.set(route_label(self.route_var.get())))
+            self._route_names = {route_label(n): n for n in list_routes()}
+            self.route_combo = Combo(rb, compact=True, textvariable=self.route_text, state="readonly", width=28, values=list(self._route_names))
             self.route_combo.grid(row=0, column=1, sticky="w")
-            self.route_combo.inner.bind("<<ComboboxSelected>>", lambda e: self.on_route_chosen())
+            self.route_combo.inner.bind("<<ComboboxSelected>>", lambda e: self.on_route_picked())
             self.route_note = ttk.Label(rb, text="", style="Dim.TLabel")
             self.route_note.grid(row=0, column=2, sticky="e")
             Btn(rb, text="Measure", style="Ghost.TButton", command=lambda: self.refresh_route_card(probe=True)).grid(row=0, column=3, padx=(10, 0))
@@ -2559,6 +2587,11 @@ def build_app():
             self.addr_socks.configure(text=f"socks5h://{host}:{port}")
 
         # ── route card ───────────────────────────────────────────────────
+        def on_route_picked(self):
+            shown = self.route_text.get()
+            self.route_var.set(self._route_names.get(shown, shown))
+            self.on_route_chosen()
+
         def on_route_chosen(self):
             self.settings["route"] = self.route_var.get()
             save_settings(self.settings)
@@ -2567,7 +2600,8 @@ def build_app():
 
         def refresh_route_card(self, probe=False):
             routes = list_routes()
-            self.route_combo.inner.configure(values=routes)
+            self._route_names = {route_label(n): n for n in routes}
+            self.route_combo.inner.configure(values=list(self._route_names))
             if self.route_var.get() not in routes:
                 self.route_var.set(routes[0] if routes else "")
             name = self.route_var.get()
@@ -2596,7 +2630,8 @@ def build_app():
                 ms = self.rtts.get(address)
                 shown = "hidden hop" if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", address) else address
                 sub = shown if ms is None else f"{shown} · {ms:.0f} ms"
-                nodes.append((role.title() or "Hop", sub, "exit" if role == "exit" else "hop"))
+                country = route_country(self.route_var.get()) if role == "exit" else ""
+                nodes.append(((role.title() or "Hop") + (f" · {country}" if country else ""), sub, "exit" if role == "exit" else "hop"))
             if chain:
                 nodes.append(("Internet", "the site you visit", "net"))
             else:

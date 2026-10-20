@@ -216,6 +216,31 @@ def list_routes():
         return []
 
 
+_ROUTE_COUNTRY = {}
+
+
+def route_country(name):
+    """The two-letter code a route's .ztr gives as `exit_country` (the country its exit is in), or ''. Cached per file."""
+    try:
+        path = ROUTES_DIR / name
+        stamp = path.stat().st_mtime
+        hit = _ROUTE_COUNTRY.get(name)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        value = json.loads(path.read_text()).get("exit_country")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    code = value.upper() if isinstance(value, str) and re.fullmatch(r"[A-Za-z]{2}", value) else ""
+    _ROUTE_COUNTRY[name] = (stamp, code)
+    return code
+
+
+def route_label(name):
+    """A route's name for a list: 'US  ·  route.ztr', unless the file name already starts with the country (US_3b983776.ztr)."""
+    code = route_country(name) if name else ""
+    return f"{code}  ·  {name}" if code and not name.upper().startswith(code + "_") else name
+
+
 def service_up(port=CONTROL_PORT):
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=1.5):

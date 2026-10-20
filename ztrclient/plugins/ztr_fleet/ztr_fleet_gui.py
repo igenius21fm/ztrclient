@@ -41,7 +41,7 @@ from ztr_fleet_core import (  # noqa: E402
     norm_hook, hook_title, hook_wanted, fix_executable, scan_hooks_folder, create_hook, run_hook, HOOK_TEMPLATES,
     run_summary_hook, summary_payload, collect_followups, followup_targets, load_saved_jobs, save_saved_jobs, norm_saved_job,
     saved_job_problems, saved_job_servers, describe_schedule, norm_schedule, install_schedule, remove_schedule, schedule_status,
-    schedule_available, DAYS, DEFAULT_OPTS, job_log_path)
+    schedule_available, DAYS, DEFAULT_OPTS, job_log_path, route_country, route_label)
 
 APP_NAME = "ZTR Fleet"
 
@@ -161,7 +161,7 @@ def plan_lines(chosen, job, opts):
         if len(plan) > 1:
             lines.append("Batch %d" % index)
         for s in group:
-            where = "%s via %s as %s" % (s.name, s.route, s.user)
+            where = "%s via %s as %s" % (s.name, route_label(s.route), s.user)
             if job["kind"] == "cmd":
                 what = substitute(job["command"], s)[0]
                 if job.get("sudo_password") or job.get("sudo_passwords") or opts.get("sudo"):
@@ -1281,7 +1281,7 @@ def build_app():
             for s in self.servers:
                 if group != "All groups" and s.group != group:
                     continue
-                if text and text not in (s.name + " " + s.alias + " " + s.route + " " + s.group).lower():
+                if text and text not in (s.name + " " + s.alias + " " + s.route + " " + route_country(s.route) + " " + s.group).lower():
                     continue
                 out.append(s)
             return out
@@ -1309,7 +1309,7 @@ def build_app():
                     tk.Label(row, text=s.group, bg=CARD, fg=TEAL, font=UI["small"]).grid(row=0, column=1, sticky="w", padx=(8, 0))
                 g = Glyph(row, state, size=16)
                 g.grid(row=0, column=2, sticky="e", padx=(6, 4))
-                sub = "%s  ·  %s@%s" % (s.route, s.user, s.alias if len(s.alias) < 26 else s.alias[:12] + "…" + s.alias[-10:])
+                sub = "%s  ·  %s@%s" % (route_label(s.route), s.user, s.alias if len(s.alias) < 26 else s.alias[:12] + "…" + s.alias[-10:])
                 if s.vars:
                     extra = format_vars(s.vars)
                     sub += "  ·  " + (extra if len(extra) < 30 else extra[:28] + "…")
@@ -1401,6 +1401,10 @@ def build_app():
             routes = list_routes()
             if new and routes and not v["route"].get():
                 v["route"].set(routes[0])
+            # the dropdown shows 'US  ·  route.ztr'; v["route"] keeps the plain file name (also when one is typed in)
+            route_names = {route_label(n): n for n in routes}
+            route_shown = tk.StringVar(value=route_label(v["route"].get()))
+            route_shown.trace_add("write", lambda *a: v["route"].set(route_names.get(route_shown.get(), route_shown.get())))
 
             def line(r, label, key, widget=None, hint=None):
                 ttk.Label(body, text=label).grid(row=r, column=0, sticky="w", padx=(0, 14), pady=4)
@@ -1409,7 +1413,7 @@ def build_app():
                 return w
             line(1, "Name", "name")
             line(2, "Alias or address", "alias")
-            line(3, "Route", "route", Combo(body, compact=True, textvariable=v["route"], width=32, values=routes))
+            line(3, "Route", "route", Combo(body, compact=True, textvariable=route_shown, width=32, values=list(route_names)))
             line(4, "User", "user")
             line(5, "SSH port", "port")
             line(6, "Group (optional)", "group")
@@ -1478,7 +1482,7 @@ def build_app():
             for i, s in enumerate(found):
                 var = tk.BooleanVar(value=True)
                 picks.append((s, var))
-                Check(body, text="%s   (%s, %s@%s)" % (s.name, s.route, s.user, s.alias if len(s.alias) < 30 else s.alias[:14] + "…"), variable=var).grid(row=2 + i, column=0, sticky="w", pady=2)
+                Check(body, text="%s   (%s, %s@%s)" % (s.name, route_label(s.route), s.user, s.alias if len(s.alias) < 30 else s.alias[:14] + "…"), variable=var).grid(row=2 + i, column=0, sticky="w", pady=2)
             row = ttk.Frame(body, style="Card.TFrame")
             row.grid(row=3 + len(found), column=0, sticky="e", pady=(14, 0))
 

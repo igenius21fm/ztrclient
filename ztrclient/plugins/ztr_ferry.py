@@ -1276,6 +1276,31 @@ def list_routes():
         return []
 
 
+_ROUTE_COUNTRY = {}
+
+
+def route_country(name):
+    """The two-letter code a route's .ztr gives as `exit_country` (the country its exit is in), or ''. Cached per file."""
+    try:
+        path = ROUTES_DIR / name
+        stamp = path.stat().st_mtime
+        hit = _ROUTE_COUNTRY.get(name)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        value = json.loads(path.read_text()).get("exit_country")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    code = value.upper() if isinstance(value, str) and re.fullmatch(r"[A-Za-z]{2}", value) else ""
+    _ROUTE_COUNTRY[name] = (stamp, code)
+    return code
+
+
+def route_label(name):
+    """A route's name for a list: 'US  ·  route.ztr', unless the file name already starts with the country (US_3b983776.ztr)."""
+    code = route_country(name) if name else ""
+    return f"{code}  ·  {name}" if code and not name.upper().startswith(code + "_") else name
+
+
 def fmt_elapsed(seconds):
     """'3.2 s', '42 s', '1 min 05 s', '1 h 02 min'."""
     seconds = max(0.0, float(seconds))
@@ -2494,7 +2519,18 @@ def build_app():
             rf.grid(row=1, column=3, sticky="ew")
             rf.columnconfigure(0, weight=1)
             ttk.Label(rf, text="Route", style="Dim.TLabel").grid(row=0, column=0, sticky="w")
-            self.route_box = Combo(rf, textvariable=self.route, state="readonly", values=["Service default"] + list_routes())
+            # the dropdown shows 'US  ·  route.ztr'; self.route keeps the plain file name (or "Service default") for everything else
+            self.route_text = tk.StringVar()
+            self._route_names = {}
+
+            def route_values():
+                self._route_names = {route_label(n): n for n in list_routes()}
+                return ["Service default"] + list(self._route_names)
+            self.route_values = route_values
+            self.route.trace_add("write", lambda *a: self.route_text.set(route_label(self.route.get()) if self.route.get() not in ("", "Service default") else self.route.get()))
+            self.route_box = Combo(rf, textvariable=self.route_text, state="readonly", values=route_values())
+            self.route_box.inner.bind("<<ComboboxSelected>>", lambda e: self.route.set(self._route_names.get(self.route_text.get(), self.route_text.get())))
+            self.route_box.inner.bind("<Button-1>", lambda e: self.route_box.inner.configure(values=route_values()), add="+")
             self.route_box.grid(row=1, column=0, sticky="ew", pady=(4, 0))
             self.form_inputs.append(self.route_box)
 
@@ -2857,7 +2893,7 @@ def build_app():
             self.retitle()
             self.form_outer.grid_remove()
             self.bar_outer.grid()
-            self.bar_text.set(f"Connected  ·  {conn.user}@{conn.host}" + (f"  ·  route {conn.route}" if conn.route else ""))
+            self.bar_text.set(f"Connected  ·  {conn.user}@{conn.host}" + (f"  ·  route {route_label(conn.route)}" if conn.route else ""))
             self._set_status(f"Connected in {fmt_elapsed(time.time() - self._t_connect)}.", "ok")
             self._update_buttons()
             self.go(self.remote, "")
