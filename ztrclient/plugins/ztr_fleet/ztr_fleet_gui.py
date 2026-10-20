@@ -42,6 +42,10 @@ from ztr_fleet_core import (  # noqa: E402
     run_summary_hook, summary_payload, collect_followups, followup_targets, load_saved_jobs, save_saved_jobs, norm_saved_job,
     saved_job_problems, saved_job_servers, describe_schedule, norm_schedule, install_schedule, remove_schedule, schedule_status,
     schedule_available, DAYS, DEFAULT_OPTS, job_log_path, route_country, route_label)
+try:
+    from ztr_flags import FLAGS  # noqa: E402  (small flag images by country code; without them the code is shown instead)
+except ImportError:
+    FLAGS = {}
 
 APP_NAME = "ZTR Fleet"
 
@@ -663,6 +667,20 @@ def build_app():
     def Combo(parent, **kw):
         return Field(parent, combo=True, **kw)
 
+
+    _flag_cache = {}
+
+    def flag_image(code):
+        """A small flag (17x12) for a two-letter country code, or None when there isn't one."""
+        code = (code or "").upper()
+        if code not in FLAGS:
+            return None
+        if code not in _flag_cache:
+            try:
+                _flag_cache[code] = tk.PhotoImage(data=FLAGS[code])
+            except tk.TclError:
+                _flag_cache[code] = None
+        return _flag_cache[code]
 
     def _dialog(parent, title):
         """A rounded modal window centred on `parent`. Returns (window, body frame)."""
@@ -1309,11 +1327,13 @@ def build_app():
                     tk.Label(row, text=s.group, bg=CARD, fg=TEAL, font=UI["small"]).grid(row=0, column=1, sticky="w", padx=(8, 0))
                 g = Glyph(row, state, size=16)
                 g.grid(row=0, column=2, sticky="e", padx=(6, 4))
-                sub = "%s  ·  %s@%s" % (route_label(s.route), s.user, s.alias if len(s.alias) < 26 else s.alias[:12] + "…" + s.alias[-10:])
+                flag = flag_image(route_country(s.route))
+                sub = "%s  ·  %s@%s" % (s.route if flag else route_label(s.route), s.user, s.alias if len(s.alias) < 26 else s.alias[:12] + "…" + s.alias[-10:])
                 if s.vars:
                     extra = format_vars(s.vars)
                     sub += "  ·  " + (extra if len(extra) < 30 else extra[:28] + "…")
-                tk.Label(row, text=sub, bg=CARD, fg=DIM, font=UI["tiny"]).grid(row=1, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(0, 4))
+                tk.Label(row, text=(" " + sub) if flag else sub, image=flag or "", compound="left", bg=CARD, fg=DIM, font=UI["tiny"]).grid(
+                    row=1, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(0, 4))
                 for w in (row,) + tuple(row.winfo_children()):
                     if w.winfo_class() != "Canvas":
                         w.bind("<Double-Button-1>", lambda e, srv=s: self.edit_server(srv))
@@ -2450,7 +2470,9 @@ def build_app():
             b.columnconfigure(1, weight=1)
             glyph = Glyph(b, "wait", size=20)
             glyph.grid(row=0, column=0, padx=(0, 10), sticky="n")
-            title = ttk.Label(b, text=name, style="Bold.TLabel")
+            srv = next((x for x in self.servers if x.name == name), None)
+            flag = flag_image(route_country(srv.route)) if srv else None
+            title = ttk.Label(b, text=(" " + name) if flag else name, image=flag or "", compound="left", style="Bold.TLabel")
             title.grid(row=0, column=1, sticky="w")
             status = ttk.Label(b, text="", style="Dim.TLabel")
             status.grid(row=0, column=2, sticky="e")

@@ -146,7 +146,9 @@ On Linux a schedule is a systemd user timer, which runs while you are logged
 in; `loginctl enable-linger $USER` keeps it running after you log out.
 A route whose `.ztr` has an `exit_country` shows it next to the route name in the
 server list, the Add/Edit dialog and the previews (`US  ·  web.ztr`), and typing
-`us` in the server filter finds the servers that leave in the US.
+`us` in the server filter finds the servers that leave in the US. In the server list
+and on each answer the country is shown as a small flag (about 70 countries; any
+other shows its two-letter code).
 
 On macOS a schedule is a launchd agent, and macOS keeps background jobs out of
 your Downloads, Desktop and Documents folders. If the client (or the fleet file

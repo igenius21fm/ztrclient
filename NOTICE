@@ -12,3 +12,7 @@ Third-party software bundled in this repository, each under its own license:
   jQuery v3.7.1 — Copyright OpenJS Foundation and other contributors — MIT License
     ztrclient/plugins/static/vendor/ and ztrclient/plugins/ztr_requests/static/vendor/
     https://jquery.org/license
+
+  flag-icons — Copyright (c) 2013 Panayiotis Lipiridis — MIT License
+    the country flag images in ztrclient/plugins/ztr_fleet/ztr_flags.py
+    https://github.com/lipis/flag-icons/blob/main/LICENSE
