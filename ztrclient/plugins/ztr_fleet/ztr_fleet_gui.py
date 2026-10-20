@@ -673,7 +673,7 @@ def build_app():
     _flag_cache = {}
 
     def flag_image(code):
-        """A small flag (22x16) for a two-letter country code, or None when there isn't one."""
+        """A small flag (24x18) for a two-letter country code, or None when there isn't one."""
         code = (code or "").upper()
         if code not in FLAGS:
             return None
