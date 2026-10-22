@@ -842,6 +842,83 @@ def build_app():
         label.master.bind("<Configure>", fit, add="+")
         return label
 
+    def copyable(box):
+        """Lets a read-only Text be selected and copied: a click gives it the keyboard (a disabled Text doesn't take it by
+        itself), and Ctrl/Cmd+A selects everything."""
+        box.bind("<Button-1>", lambda e: box.focus_set(), add="+")
+
+        def select_all(e):
+            box.tag_add("sel", "1.0", "end-1c")
+            return "break"
+        box.bind("<%s-a>" % ("Command" if sys.platform == "darwin" else "Control"), select_all)
+        return box
+
+    class SelectText(tk.Text):
+        """Text you can read, select and copy, in place of a wrapping Label (a Label can't be selected). It grows to show all
+        its lines at whatever width it is given; `configure(text=..., fg=...)` works as it does on a Label."""
+
+        def __init__(self, parent, text="", fg="#d7d7dc", bg=CARD, font=None, menu=True, **kw):
+            super().__init__(parent, bg=bg, fg=fg, font=font or UI["body"], bd=0, highlightthickness=0, wrap="word", height=1, width=1,
+                             padx=0, pady=0, cursor="xterm", takefocus=1, selectbackground=SEL, selectforeground="#ffffff",
+                             inactiveselectbackground=SEL, insertwidth=0, **kw)
+            self._text = ""
+            copyable(self)
+            self.bind("<Configure>", lambda e: self._fit(), add="+")
+            if menu:
+                bind_context_menu(self, self._popup)
+            self.set_text(text)
+
+        def set_text(self, text):
+            self._text = text or ""
+            super().configure(state="normal")
+            self.delete("1.0", "end")
+            self.insert("1.0", self._text)
+            super().configure(state="disabled")
+            self._fit()
+
+        def _fit(self):
+            if self.winfo_width() < 30:
+                return
+            try:
+                lines = self.count("1.0", "end", "displaylines")      # "end" (not end-1c): counting to the last character misses the last line
+            except tk.TclError:
+                return
+            lines = max(1, int(lines[0]) if lines else 1)
+            if int(self.cget("height")) != lines:
+                super().configure(height=lines)
+
+        def configure(self, cnf=None, **kw):
+            if "text" in kw:
+                self.set_text(kw.pop("text"))
+            kw.pop("wraplength", None)
+            kw.pop("justify", None)
+            if kw or cnf:
+                return super().configure(cnf, **kw)
+
+        config = configure
+
+        def selection(self):
+            try:
+                return self.get("sel.first", "sel.last")
+            except tk.TclError:
+                return ""
+
+        def _popup(self, event):
+            self.focus_set()
+            menu = tk.Menu(self, tearoff=0, bg="#2c2c2f", fg=TEXT, activebackground=SEL, activeforeground="#ffffff", bd=0, font=UI["body"])
+            picked = self.selection()
+            menu.add_command(label="Copy selection" if picked else "Copy all", command=lambda: self._copy(picked or self._text))
+            menu.add_command(label="Select all", command=lambda: self.tag_add("sel", "1.0", "end-1c"))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        def _copy(self, text):
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
     class ScrollFrame(tk.Frame):
         """A vertically scrolling column. Put widgets in `.inner`."""
 
@@ -1932,6 +2009,7 @@ def build_app():
             result = tk.Text(holder2, width=84, height=6, bg=FIELD, fg="#d7d7dc", bd=0, highlightthickness=0, wrap="word", font=UI["mono"], padx=10, pady=8)
             result.insert("1.0", "(not run yet)")
             result.configure(state="disabled")
+            copyable(result)
             result.grid(row=0, column=0, sticky="ew")
             row = ttk.Frame(body, style="Card.TFrame")
             row.grid(row=6, column=0, sticky="e", pady=(12, 0))
@@ -2125,6 +2203,7 @@ def build_app():
             box.configure(yscrollcommand=sb.set)
             box.insert("1.0", "\n".join(lines))
             box.configure(state="disabled")
+            copyable(box)
             box.grid(row=0, column=0, sticky="ew")
             sb.grid(row=0, column=1, sticky="ns")
             row = ttk.Frame(body, style="Card.TFrame")
@@ -2432,7 +2511,7 @@ def build_app():
                 ttk.Label(box, text=n["title"], style="Bold.TLabel").grid(row=0, column=0, sticky="w")
                 targets, missing = followup_targets(n, self.servers)
                 where = "every server" if n["all"] else ", ".join(t.name for t in targets) or "no server in the fleet"
-                tk.Label(box, text=n["command"][:200], bg=CARD, fg="#d7d7dc", font=UI["mono"], anchor="w", justify="left").grid(row=1, column=0, sticky="w")
+                SelectText(box, text=n["command"][:200], font=UI["mono"]).grid(row=1, column=0, sticky="ew")
                 ttk.Label(box, text="on %s  ·  from %s%s" % (where, n["source"] or "a hook", ("  ·  not in the fleet: " + ", ".join(missing)) if missing else ""),
                           style="Dim.TLabel").grid(row=2, column=0, sticky="w")
                 btns = ttk.Frame(box, style="Card.TFrame")
@@ -2475,8 +2554,8 @@ def build_app():
                           foreground=GREEN if ok else AMBER).grid(row=1 + 2 * i, column=0, sticky="w", pady=(6, 0))
                 text = (h["out"] if ok else "\n".join(t for t in (h["err"], h["out"]) if t)) or "(it printed nothing)"
                 lines = text.splitlines()
-                tk.Label(b, text="\n".join(lines[:10]) + ("\n… %d more" % (len(lines) - 10) if len(lines) > 10 else ""), bg=CARD, fg="#d7d7dc" if ok else AMBER,
-                         font=UI["mono"], justify="left", anchor="w", wraplength=560).grid(row=2 + 2 * i, column=0, sticky="w")
+                SelectText(b, text="\n".join(lines[:10]) + ("\n… %d more" % (len(lines) - 10) if len(lines) > 10 else ""), fg="#d7d7dc" if ok else AMBER,
+                           font=UI["mono"]).grid(row=2 + 2 * i, column=0, sticky="ew")
 
         def make_card(self, inner, row, name):
             card = Card(inner, radius=12, pad=(14, 10))
@@ -2499,9 +2578,8 @@ def build_app():
             view = Btn(b, text="Full answer", style="Small.TButton", command=lambda n=name: self.show_full(n))
             view.grid(row=1, column=2, columnspan=2, sticky="e", pady=(4, 0))
             view.grid_remove()
-            out = tk.Label(b, text="", bg=CARD, fg="#d7d7dc", font=UI["mono"], justify="left", anchor="w", wraplength=520)
+            out = SelectText(b, text="", font=UI["mono"], menu=False)   # the card's own right-click menu covers it (see card_menu)
             out.grid(row=2, column=1, columnspan=3, sticky="ew", pady=(6, 0))
-            autowrap(out)
             bar = tk.Canvas(b, height=4, bg=CARD, highlightthickness=0)
             bar.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(8, 0))
             card.configure()
@@ -2513,6 +2591,10 @@ def build_app():
         def card_menu(self, event, name):
             r = self.results.get(name)
             menu = tk.Menu(self.root, **self.menu_kw)
+            picked = event.widget.selection() if isinstance(event.widget, SelectText) else ""
+            if picked:
+                menu.add_command(label="Copy selection", command=lambda: self.copy(picked, "Copied"))
+                menu.add_separator()
             menu.add_command(label="Show the full answer", command=lambda: self.show_full(name), state="normal" if r else "disabled")
             menu.add_command(label="Copy answer", command=lambda: self.copy((r or {}).get("out", ""), "Answer copied"), state="normal" if r else "disabled")
             menu.add_command(label="Open a shell", command=lambda: self.open_shell(next(s for s in self.servers if s.name == name)))
@@ -2552,6 +2634,7 @@ def build_app():
                                                      (h["out"] if h["rc"] == 0 else "\n".join(t for t in (h["err"], h["out"]) if t)) or "(no output)")
             box.insert("1.0", shown_text)
             box.configure(state="disabled")
+            copyable(box)
             box.grid(row=0, column=0, sticky="ew")
             ys.grid(row=0, column=1, sticky="ns")
             xs.grid(row=1, column=0, sticky="ew")
@@ -2654,14 +2737,12 @@ def build_app():
                 ttk.Label(b, text=head, style="Bold.TLabel", foreground=color).grid(row=0, column=1, sticky="w")
                 ttk.Label(b, text=",  ".join(g["members"]), style="Dim.TLabel", wraplength=480, justify="left").grid(row=1, column=1, sticky="w")
                 for hrow, htext, hcolor in self.hook_lines(g["members"]):
-                    tk.Label(b, text=htext, bg=CARD, fg=hcolor, font=UI["small"], justify="left", anchor="w", wraplength=520).grid(row=10 + hrow, column=1, sticky="w", pady=(4 if hrow == 0 else 0, 0))
+                    SelectText(b, text=htext, fg=hcolor, font=UI["small"]).grid(row=10 + hrow, column=1, sticky="ew", pady=(4 if hrow == 0 else 0, 0))
                 text = g["text"] if g["text"].strip() else ("(no output)" if g["ok"] else "")
                 lines = text.splitlines()
                 shown = "\n".join(lines[:8]) + ("\n…" if len(lines) > 8 else "")
                 if shown:
-                    out = tk.Label(b, text=shown, bg=CARD, fg="#d7d7dc" if g["ok"] else AMBER, font=UI["mono"], justify="left", anchor="w", wraplength=520)
-                    out.grid(row=2, column=1, sticky="ew", pady=(6, 0))
-                    autowrap(out)
+                    SelectText(b, text=shown, fg="#d7d7dc" if g["ok"] else AMBER, font=UI["mono"]).grid(row=2, column=1, sticky="ew", pady=(6, 0))
 
         # ── scheduled jobs ───────────────────────────────────────────────
         def last_scheduled_run(self, name):
@@ -2750,6 +2831,7 @@ def build_app():
             box.insert("1.0", text)
             box.see("end")
             box.configure(state="disabled")
+            copyable(box)
             box.grid(row=0, column=0, sticky="ew")
             ys.grid(row=0, column=1, sticky="ns")
             row = ttk.Frame(body, style="Card.TFrame")
