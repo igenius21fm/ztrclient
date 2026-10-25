@@ -10,7 +10,13 @@
 # from several terminals at once against the same or different targets
 # never collides on "port already in use".
 #
-#   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key]
+#   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
+#
+# --copy-id installs your public key on the server (ssh-copy-id) through the tunnel instead of opening a shell. It asks
+# for the account's password once; afterwards the same command without --copy-id logs in with the key. The flags it
+# understands are -l user, -i key (the key to install; default: the newest of ~/.ssh/id*.pub), -o option, -F ssh_config,
+# and ssh-copy-id's own -f, -n (dry run), -s and -t path:
+#   ztr_ssh --copy-id -l myuser -i ~/.ssh/id_ed25519.pub --rh "example._ztr" --rp 22
 #
 # --config-file (optional) is the filename of a .ztr in routes/ — this one
 # session goes through that route. Leave it off and the session uses the
@@ -62,6 +68,7 @@ REAL_PORT="22"
 CONTROL_PORT="2223"
 CONFIG_FILE=""
 KEEP_HOST_KEY=0
+COPY_ID=0
 SSH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -90,6 +97,10 @@ while [[ $# -gt 0 ]]; do
       KEEP_HOST_KEY=1
       shift
       ;;
+    --copy-id)
+      COPY_ID=1
+      shift
+      ;;
     *)
       SSH_ARGS+=("$1")
       shift
@@ -98,9 +109,54 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$REAL_HOST" ]]; then
-  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--config-file <name>.ztr] [--cp 2223] [--keep-host-key]"
+  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id]"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
   exit 1
+fi
+
+# --copy-id: the ssh flags become ssh-copy-id's. It has no -l, so the user goes into the destination (user@address, which
+# is only known once the tunnel is up); -p is the tunnel's, never the caller's. Checked here so a bad flag fails before a
+# tunnel is opened.
+COPY_ARGS=()
+COPY_USER=""
+COPY_KEY=""
+if [[ "$COPY_ID" -eq 1 ]]; then
+  if ! command -v ssh-copy-id >/dev/null 2>&1; then
+    log_err "--copy-id needs ssh-copy-id, which wasn't found (it comes with OpenSSH; on a Mac: brew install ssh-copy-id)"
+    exit 1
+  fi
+  flags=(${SSH_ARGS[@]+"${SSH_ARGS[@]}"})
+  i=0
+  while (( i < ${#flags[@]} )); do
+    flag="${flags[$i]}"
+    case "$flag" in
+      -l|-i|-o|-F|-t)
+        if (( i + 1 >= ${#flags[@]} )); then
+          log_err "--copy-id: $flag needs a value"
+          exit 1
+        fi
+        value="${flags[$((i + 1))]}"
+        case "$flag" in
+          -l) COPY_USER="$value" ;;
+          -i) COPY_KEY="$value"; COPY_ARGS+=(-i "$value") ;;
+          *)  COPY_ARGS+=("$flag" "$value") ;;
+        esac
+        i=$((i + 2))
+        ;;
+      -l?*) COPY_USER="${flag#-l}"; i=$((i + 1)) ;;
+      -i?*) COPY_KEY="${flag#-i}"; COPY_ARGS+=("$flag"); i=$((i + 1)) ;;
+      -o?*|-F?*|-t?*) COPY_ARGS+=("$flag"); i=$((i + 1)) ;;
+      -f|-n|-s|-x) COPY_ARGS+=("$flag"); i=$((i + 1)) ;;
+      -p|-p?*)
+        log_err "--copy-id: the local port is the tunnel's; use --rp for the server's own SSH port"
+        exit 1
+        ;;
+      *)
+        log_err "--copy-id doesn't understand '$flag' — it takes -l user, -i key, -o option, -F ssh_config, -f, -n, -s and -t path"
+        exit 1
+        ;;
+    esac
+  done
 fi
 
 if [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" == */* ]]; then
@@ -262,6 +318,22 @@ if [[ "$OK" != "True" ]]; then
   log_err "failed to start tunnel: ${ERROR_MSG:-unknown error}"
   SESSION_ID=""   # nothing to end — the service never created a session
   exit 1
+fi
+
+if [[ "$COPY_ID" -eq 1 ]]; then
+  log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), installing your key with ssh-copy-id ..."
+  maybe_offer_hostkey_config "$LOCAL_IP"
+  ssh-copy-id ${COPY_ARGS[@]+"${COPY_ARGS[@]}"} -p "$LOCAL_PORT" "${COPY_USER:+${COPY_USER}@}${LOCAL_IP}"
+  COPY_EXIT=$?
+  if [[ "$COPY_EXIT" -eq 0 ]]; then
+    login="ztr_ssh"
+    [[ -n "$COPY_KEY" ]] && login+=" -i ${COPY_KEY%.pub}"
+    [[ -n "$COPY_USER" ]] && login+=" -l ${COPY_USER}"
+    login+=" --rh \"${REAL_HOST}\" --rp ${REAL_PORT}"
+    [[ -n "$CONFIG_FILE" ]] && login+=" --config-file ${CONFIG_FILE}"
+    log_ok "done. Log in with the key:  ${login}"
+  fi
+  exit "$COPY_EXIT"
 fi
 
 log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), connecting ssh ..."

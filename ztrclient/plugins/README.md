@@ -146,6 +146,24 @@ whatever `ztr_tunnel_lp.py` is actually bound to — don't hardcode
 identity, `-l`/`-U` user, etc.) — never `-p`/`-h`/a destination; these
 scripts always supply those themselves.
 
+### Installing your key (`ztr_ssh --copy-id`)
+
+`--copy-id` runs `ssh-copy-id` through the tunnel instead of opening a shell, so
+you can switch a server from password to key login without it ever seeing your
+own address:
+
+```bash
+ztr_ssh --copy-id -l myuser -i ~/.ssh/id_ed25519.pub --rh "example._ztr" --rp 22
+# asks for myuser's password once, installs the key, then prints the command
+# that logs in with it:  ztr_ssh -i ~/.ssh/id_ed25519 -l myuser --rh "example._ztr" --rp 22
+```
+
+The flags it takes are `-l user`, `-i key` (the key to install; by default the
+newest `~/.ssh/id*.pub`), `-o option`, `-F ssh_config`, and `ssh-copy-id`'s own
+`-f`, `-n` (a dry run that changes nothing), `-s` and `-t path`. It needs
+`ssh-copy-id` (part of OpenSSH; on a Mac, `brew install ssh-copy-id`) and a
+server that still allows password login.
+
 ### Host-key prompts (`ztr_ssh` only)
 
 Every session gets a fresh ephemeral port, so `ssh` sees a "new host" every
