@@ -13,8 +13,10 @@
 #   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
 #   ztr_ssh --routes [--cp 2223]
 #
-# --routes lists the routes in routes/ (exit country, status, hop health, how many sessions are using each) and exits.
-# It doesn't open a tunnel or need --rh, and never shows keys or addresses.
+# --routes lists the routes in routes/ (exit country, status, hop health, entry and exit IP, how many sessions are using each)
+# and exits.
+# It doesn't open a tunnel or need --rh, and never shows keys. The entry and exit hops are shown by IP; the middle hop is
+# only ever an alias, so it isn't listed.
 #
 # --copy-id installs your public key on the server (ssh-copy-id) through the tunnel instead of opening a shell. It asks
 # for the account's password once; afterwards the same command without --copy-id logs in with the key. The flags it
@@ -160,17 +162,19 @@ for path in files:
         status = str(route.get("status") or "unknown")
         if route.get("status_reason"):
             status += " (%s)" % route["status_reason"]
-        rows.append((name, str(route.get("exit_country") or "-"), status, hops, str(route.get("route_id") or "-")[:8],
-                     str(in_use.get(name, 0)) if service_up else "-", status.startswith("active") and not down))
+        where = {hop.get("role"): str(hop.get("address") or "-") for hop in chain}
+        rows.append((name, str(route.get("exit_country") or "-"), status, hops, where.get("entry", "-"), where.get("exit", "-"),
+                     str(route.get("route_id") or "-")[:8], str(in_use.get(name, 0)) if service_up else "-",
+                     status.startswith("active") and not down))
     except (OSError, ValueError, AttributeError):
-        rows.append((name, "-", "unreadable", "-", "-", "-", False))
+        rows.append((name, "-", "unreadable", "-", "-", "-", "-", "-", False))
 
-head = ("ROUTE FILE", "EXIT", "STATUS", "HOPS", "ID", "IN USE")
-widths = [max(len(head[i]), *(len(r[i]) for r in rows)) for i in range(6)]
-print(paint("2", "  ".join(head[i].ljust(widths[i]) for i in range(6)).rstrip()))
+head = ("ROUTE FILE", "EXIT", "STATUS", "HOPS", "ENTRY IP", "EXIT IP", "ID", "IN USE")
+widths = [max(len(head[i]), *(len(r[i]) for r in rows)) for i in range(8)]
+print(paint("2", "  ".join(head[i].ljust(widths[i]) for i in range(8)).rstrip()))
 for r in rows:
-    cells = [r[i].ljust(widths[i]) for i in range(6)]
-    cells[2] = paint("32" if r[6] else "31", cells[2])
+    cells = [r[i].ljust(widths[i]) for i in range(8)]
+    cells[2] = paint("32" if r[8] else "31", cells[2])
     print("  ".join(cells).rstrip())
 print()
 if not service_up:
