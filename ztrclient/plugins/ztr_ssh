@@ -11,6 +11,10 @@
 # never collides on "port already in use".
 #
 #   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
+#   ztr_ssh --routes [--cp 2223]
+#
+# --routes lists the routes in routes/ (exit country, status, hop health, how many sessions are using each) and exits.
+# It doesn't open a tunnel or need --rh, and never shows keys or addresses.
 #
 # --copy-id installs your public key on the server (ssh-copy-id) through the tunnel instead of opening a shell. It asks
 # for the account's password once; afterwards the same command without --copy-id logs in with the key. The flags it
@@ -69,6 +73,7 @@ CONTROL_PORT="2223"
 CONFIG_FILE=""
 KEEP_HOST_KEY=0
 COPY_ID=0
+ROUTES=0
 SSH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -101,6 +106,10 @@ while [[ $# -gt 0 ]]; do
       COPY_ID=1
       shift
       ;;
+    --routes)
+      ROUTES=1
+      shift
+      ;;
     *)
       SSH_ARGS+=("$1")
       shift
@@ -108,8 +117,70 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --routes: a read-only look at routes/ — one line per .ztr, nothing secret. Sessions come from the tunnel service when it is running.
+if [[ "$ROUTES" -eq 1 ]]; then
+  routes_dir="$(python3 -c 'import os, sys; print(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))), "routes"))' "${BASH_SOURCE[0]}")"
+  exec python3 - "$routes_dir" "$CONTROL_PORT" <<'PY'
+import glob, json, os, socket, sys
+
+routes_dir, port = sys.argv[1], int(sys.argv[2])
+tty = sys.stdout.isatty()
+
+
+def paint(code, text):
+    return "\033[%sm%s\033[0m" % (code, text) if tty else text
+
+
+files = sorted(glob.glob(os.path.join(routes_dir, "*.ztr")), key=lambda f: (os.path.basename(f) != "route.ztr", os.path.basename(f)))
+if not files:
+    sys.exit("[ztr_ssh] no .ztr routes found in %s" % routes_dir)
+
+in_use = {}
+service_up = False
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as conn:
+        conn.sendall(b'{"cmd": "list"}\n')
+        reply = json.loads(conn.makefile().readline())
+        if reply.get("status"):
+            service_up = True
+            for item in reply.get("sessions", []):
+                in_use[item.get("config_file")] = in_use.get(item.get("config_file"), 0) + 1
+except (OSError, ValueError):
+    pass
+
+rows = []
+for path in files:
+    name = os.path.basename(path)
+    try:
+        with open(path) as handle:
+            route = json.load(handle)
+        chain = sorted(route.get("chain") or [], key=lambda hop: hop.get("hop", 0))
+        down = ["%s %s" % (hop.get("role", "hop"), hop.get("status", "unknown")) for hop in chain if hop.get("status") != "online"]
+        hops = "%d online" % len(chain) if not down else "%d of %d online (%s)" % (len(chain) - len(down), len(chain), ", ".join(down))
+        status = str(route.get("status") or "unknown")
+        if route.get("status_reason"):
+            status += " (%s)" % route["status_reason"]
+        rows.append((name, str(route.get("exit_country") or "-"), status, hops, str(route.get("route_id") or "-")[:8],
+                     str(in_use.get(name, 0)) if service_up else "-", status.startswith("active") and not down))
+    except (OSError, ValueError, AttributeError):
+        rows.append((name, "-", "unreadable", "-", "-", "-", False))
+
+head = ("ROUTE FILE", "EXIT", "STATUS", "HOPS", "ID", "IN USE")
+widths = [max(len(head[i]), *(len(r[i]) for r in rows)) for i in range(6)]
+print(paint("2", "  ".join(head[i].ljust(widths[i]) for i in range(6)).rstrip()))
+for r in rows:
+    cells = [r[i].ljust(widths[i]) for i in range(6)]
+    cells[2] = paint("32" if r[6] else "31", cells[2])
+    print("  ".join(cells).rstrip())
+print()
+if not service_up:
+    print(paint("2", "The tunnel service isn't answering on 127.0.0.1:%d, so IN USE is unknown." % port))
+print(paint("2", "Pick one with --config-file <route file>; without it a session uses the service's own default route (normally route.ztr)."))
+PY
+fi
+
 if [[ -z "$REAL_HOST" ]]; then
-  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id]"
+  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id | --routes]"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
   exit 1
 fi

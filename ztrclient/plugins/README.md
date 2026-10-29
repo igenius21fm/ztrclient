@@ -164,6 +164,25 @@ newest `~/.ssh/id*.pub`), `-o option`, `-F ssh_config`, and `ssh-copy-id`'s own
 `ssh-copy-id` (part of OpenSSH; on a Mac, `brew install ssh-copy-id`) and a
 server that still allows password login.
 
+### Listing your routes (`ztr_ssh --routes`)
+
+`ztr_ssh --routes` prints one line for each route file in `routes/` and exits. It
+doesn't open a tunnel or need `--rh`:
+
+```
+ROUTE FILE     EXIT  STATUS  HOPS      ID        IN USE
+route.ztr      US    active  3 online  f184b623  1
+DE_308d18.ztr  DE    active  3 online  308d18c4  0
+```
+
+It shows the exit country, the route's status, whether every hop is online (a
+route with a hop down reads, for example, `2 of 3 online (middle offline)`), a
+short route ID, and how many sessions are using the route right now. Keys and
+hop addresses are never shown. If the tunnel service isn't running, the routes
+are still listed and IN USE shows `-`. Use `--cp` if the service listens on a
+different control port, and `--config-file <route file>` to send a session
+through a particular route.
+
 ### Host-key prompts (`ztr_ssh` only)
 
 Every session gets a fresh ephemeral port, so `ssh` sees a "new host" every
