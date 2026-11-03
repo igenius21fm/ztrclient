@@ -56,6 +56,7 @@ server-side TLS/certificate machinery to give this the other half of that.
 import argparse
 import collections
 import http.server
+import ipaddress
 import itertools
 import os
 import select
@@ -145,6 +146,8 @@ class Telemetry:
             self.active = {}
             self.recent = collections.deque(maxlen=self.RECENT)
             self.hosts = {}
+            self.host_devices = {}   # host -> client address -> {"count", "up", "down", "last"}
+            self.self_clients = set()   # client addresses that turned out to be the machine the proxy runs on
             self.logs = collections.deque(maxlen=self.LOG_LINES)
             self.setup_series = collections.deque(maxlen=self.SERIES)   # (time, seconds to get a tunnel, warm?)
             self.rate_series = collections.deque(maxlen=self.SERIES)    # (time, bytes up in the last second, bytes down)
@@ -153,14 +156,19 @@ class Telemetry:
             self._closers = {}
 
     # -- connections
-    def conn_start(self, kind, host, port, detail="", observe=True):
+    def conn_start(self, kind, host, port, detail="", observe=True, client="", client_self=False):
+        """`client` is the address of the device that made the connection; `client_self` says it is the machine the
+        proxy runs on (the browser used 127.0.0.1 or this machine's own network address)."""
         with self._lock:
             cid = next(self._ids)
-            record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "state": "opening",
+            record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "client": client,
+                      "client_self": bool(client_self), "state": "opening",
                       "started": time.time(), "setup": None, "warm": False, "up": 0, "down": 0,
                       "status": None, "error": None, "ended": None, "last_active": time.time(), "idle_closed": False}
             self.active[cid] = record
             self.counters["connections"] += 1
+            if client and client_self:
+                self.self_clients.add(client)
             snapshot = dict(record)
         if observe and self.guard:
             self.guard.on_start(snapshot)
@@ -192,6 +200,10 @@ class Telemetry:
                                                    "up": 0, "down": 0, "last": 0.0, "failed": 0})
             h["count"] += 1
             h["last"] = time.time()
+            if c.get("client"):
+                d = self.host_devices.setdefault(c["host"], {}).setdefault(c["client"], {"count": 0, "up": 0, "down": 0, "last": 0.0})
+                d["count"] += 1
+                d["last"] = h["last"]
             if tunnel:
                 self.counters["warm_used" if warm else "cold_opened"] += 1
                 self.setup_series.append((time.time(), setup, bool(warm)))
@@ -228,6 +240,10 @@ class Telemetry:
                 if h is not None:
                     h["up"] += up
                     h["down"] += down
+                d = self.host_devices.get(c["host"], {}).get(c.get("client"))
+                if d is not None:
+                    d["up"] += up
+                    d["down"] += down
 
     def conn_end(self, cid, status=None):
         with self._lock:
@@ -320,6 +336,8 @@ class Telemetry:
                 "active": [dict(c) for c in self.active.values()],
                 "recent": [dict(c) for c in list(self.recent)[:200]],
                 "hosts": [dict(h) for h in self.hosts.values()],
+                "self_clients": sorted(self.self_clients),
+                "host_devices": {host: {ip: dict(d) for ip, d in devices.items()} for host, devices in self.host_devices.items()},
                 "logs": list(self.logs)[-400:],
                 "setup_series": list(self.setup_series),
                 "rate_series": list(self.rate_series),
@@ -334,6 +352,22 @@ TELEMETRY.guard = GUARD
 def _log(message, level="info"):
     sys.stderr.write(f"[ztr_proxy] {message}\n")
     TELEMETRY.log(message, level)
+
+
+def _peer(sock):
+    """(address, is_this_machine) for the device on the other end of an accepted socket. An IPv4 address that arrived
+    over an IPv6 listener ("::ffff:192.168.1.5") is shown as plain IPv4."""
+    try:
+        ip = sock.getpeername()[0]
+        mine = sock.getsockname()[0]
+    except (OSError, IndexError):
+        return "", False
+    ip, mine = (a[7:] if a.lower().startswith("::ffff:") else a for a in (ip, mine))
+    try:
+        loopback = ipaddress.ip_address(ip.split("%")[0]).is_loopback
+    except ValueError:
+        loopback = False
+    return ip, loopback or ip == mine
 
 
 def _connection_listed(headers):
@@ -727,13 +761,14 @@ def serve_socks5(sock, session):
         _warned_ip_target = True
         _log(f"a client asked for the address {host} directly — it resolved the name itself, outside the tunnel. "
              "Use socks5h:// (curl: --socks5-hostname) so this proxy resolves names instead.")
+    client, client_self = _peer(sock)
     blocked = GUARD.check_block(host, port)
     if blocked:
-        TELEMETRY.conn_blocked(TELEMETRY.conn_start("SOCKS5", host, port, observe=False), blocked)
+        TELEMETRY.conn_blocked(TELEMETRY.conn_start("SOCKS5", host, port, observe=False, client=client, client_self=client_self), blocked)
         _log(f"socks5 CONNECT {host}:{port} refused: on the blocklist ({blocked['pattern']})", "warn")
         _socks_reply(sock, _SOCKS_NOT_ALLOWED)
         return
-    cid = TELEMETRY.conn_start("SOCKS5", host, port)
+    cid = TELEMETRY.conn_start("SOCKS5", host, port, client=client, client_self=client_self)
     try:
         began = time.time()
         conn, _client = session.open_tunnel(host, port)
@@ -805,13 +840,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(400, "malformed CONNECT target")
             return
 
+        client, client_self = _peer(self.connection)
         blocked = GUARD.check_block(host, port)
         if blocked:
-            TELEMETRY.conn_blocked(TELEMETRY.conn_start("CONNECT", host, port, observe=False), blocked)
+            TELEMETRY.conn_blocked(TELEMETRY.conn_start("CONNECT", host, port, observe=False, client=client, client_self=client_self), blocked)
             _log(f"CONNECT {host}:{port} refused: on the blocklist ({blocked['pattern']})", "warn")
             self._refuse(blocked)
             return
-        cid = TELEMETRY.conn_start("CONNECT", host, port)
+        cid = TELEMETRY.conn_start("CONNECT", host, port, client=client, client_self=client_self)
         began = time.time()
         try:
             conn, _client = self.server.session.open_tunnel(host, port)
@@ -880,13 +916,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         host, port = parts.hostname or parts.netloc, parts.port or (443 if parts.scheme == "https" else 80)
+        client, client_self = _peer(self.connection)
         blocked = GUARD.check_block(host, port)
         if blocked:
-            TELEMETRY.conn_blocked(TELEMETRY.conn_start("HTTP", host, port, detail=f"{self.command} {parts.path or '/'}", observe=False), blocked)
+            TELEMETRY.conn_blocked(TELEMETRY.conn_start("HTTP", host, port, detail=f"{self.command} {parts.path or '/'}", observe=False,
+                                                        client=client, client_self=client_self), blocked)
             _log(f"{self.command} {host} refused: on the blocklist ({blocked['pattern']})", "warn")
             self._refuse(blocked)
             return
-        cid = TELEMETRY.conn_start("HTTP", host, port, detail=f"{self.command} {parts.path or '/'}")
+        cid = TELEMETRY.conn_start("HTTP", host, port, detail=f"{self.command} {parts.path or '/'}", client=client, client_self=client_self)
         TELEMETRY.add_bytes(cid, len(body or b""), 0)
         try:
             self._relay_proxied_request(parts, body, cid)

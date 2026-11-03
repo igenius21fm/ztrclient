@@ -280,16 +280,21 @@ class AlertStore:
         self._next = 1
         self._dirty = False
 
-    def add(self, rule, severity, host, port, title, evidence, action=""):
-        """Returns (alert, created, escalated)."""
+    MAX_DEVICES = 20
+
+    def add(self, rule, severity, host, port, title, evidence, action="", devices=()):
+        """Returns (alert, created, escalated). `devices` are the addresses of the devices whose connections caused it;
+        repeats of the same finding add to the list."""
         now = self.clock()
+        devices = [d for d in devices if d]
         key = (rule, host, int(port or 0))
         with self._lock:
             aid = self._index.get(key)
             alert = self.items.get(aid) if aid else None
             if alert is None:
                 alert = {"id": self._next, "rule": rule, "severity": severity, "host": host, "port": int(port or 0), "title": title,
-                         "evidence": evidence, "count": 1, "first": now, "last": now, "state": "new", "action": action}
+                         "evidence": evidence, "count": 1, "first": now, "last": now, "state": "new", "action": action,
+                         "devices": sorted(set(devices))[:self.MAX_DEVICES]}
                 self._next += 1
                 self.items[alert["id"]] = alert
                 self._index[key] = alert["id"]
@@ -301,6 +306,7 @@ class AlertStore:
             alert["last"] = now
             alert["evidence"] = evidence
             alert["title"] = title
+            alert["devices"] = sorted(set(alert.get("devices", ())) | set(devices))[:self.MAX_DEVICES]
             if escalated:
                 alert["severity"] = severity
                 if alert["state"] != "new":
@@ -379,7 +385,8 @@ class AlertStore:
                 try:
                     a = {"id": int(a["id"]), "rule": a["rule"], "severity": a["severity"], "host": a["host"], "port": int(a["port"]),
                          "title": a["title"], "evidence": a["evidence"], "count": int(a["count"]), "first": float(a["first"]),
-                         "last": float(a["last"]), "state": a["state"], "action": a.get("action", "")}
+                         "last": float(a["last"]), "state": a["state"], "action": a.get("action", ""),
+                         "devices": [str(d) for d in a.get("devices", []) if d][:self.MAX_DEVICES]}
                 except (KeyError, TypeError, ValueError):
                     continue
                 if a["severity"] not in SEV_RANK or a["state"] not in ("new", "acknowledged", "dismissed"):
@@ -406,7 +413,7 @@ class AlertStore:
 
     def export(self, path, fmt="csv"):
         rows = self.list()
-        cols = ["id", "first", "last", "severity", "rule", "host", "port", "count", "state", "action", "title", "evidence"]
+        cols = ["id", "first", "last", "severity", "rule", "host", "port", "count", "state", "action", "devices", "title", "evidence"]
         if fmt == "json":
             Path(path).write_text(json.dumps(rows, indent=1))
             return len(rows)
@@ -414,7 +421,8 @@ class AlertStore:
             w = csv.writer(f)
             w.writerow(cols)
             for a in rows:
-                w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a[c])) if c in ("first", "last") else a[c] for c in cols])
+                w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a[c])) if c in ("first", "last")
+                            else " ".join(a.get("devices", [])) if c == "devices" else a[c] for c in cols])
         return len(rows)
 
 
@@ -490,15 +498,17 @@ class Detector:
         self.auto_block = False
         self.lock = threading.RLock()
         self.starts = collections.defaultdict(lambda: collections.deque(maxlen=60))   # (host, port) -> start times
+        self.start_clients = collections.defaultdict(lambda: collections.deque(maxlen=60))   # (host, port) -> who, in step with starts
         self.traffic = collections.defaultdict(collections.deque)                      # host -> (time, up, down) per finished connection
-        self.randoms = collections.deque(maxlen=200)                                   # (time, registrable, host)
+        self.randoms = collections.deque(maxlen=200)                                   # (time, registrable, host, who)
         self.fails = collections.defaultdict(collections.deque)                        # host -> failure times
-        self.fail_hosts = collections.deque(maxlen=400)                                # (time, host)
+        self.fail_clients = collections.defaultdict(collections.deque)                 # host -> (time, who) per failure
+        self.fail_hosts = collections.deque(maxlen=400)                                # (time, host, who)
         self._last_sweep = 0.0
         self.listeners = []   # called with (alert, created, escalated)
 
     # -- plumbing
-    def _alert(self, rule, severity, host, port, title, evidence):
+    def _alert(self, rule, severity, host, port, title, evidence, devices=()):
         if not self.enabled.get(rule, True):
             return None
         if rule not in ("blocked", "watch") and self.guard.is_trusted(host):
@@ -508,7 +518,7 @@ class Detector:
                 and not self.guard.is_blocked(host, port)):
             self.guard.block(host, note=f"added automatically: {RULES[rule][0].lower()}", source="auto")
             action = "blocked automatically"
-        alert, created, escalated = self.store.add(rule, severity, host, port, title, evidence, action=action)
+        alert, created, escalated = self.store.add(rule, severity, host, port, title, evidence, action=action, devices=devices)
         for fn in list(self.listeners):
             try:
                 fn(alert, created, escalated)
@@ -521,44 +531,54 @@ class Detector:
         sev = entry.get("severity") if entry.get("severity") in SEV_RANK else "medium"
         note = f" ({entry['note']})" if entry.get("note") else ""
         self._alert("blocked", sev, c["host"], c["port"], f"Blocked a connection to {c['host']}",
-                    f"Refused a {c['kind']} connection to {c['host']}:{c['port']}; it matches your blocklist entry {entry['pattern']}{note}.")
+                    f"Refused a {c['kind']} connection to {c['host']}:{c['port']}; it matches your blocklist entry {entry['pattern']}{note}.",
+                    devices=[c.get("client")])
 
     def on_start(self, c):
         host, port, now = c["host"], c["port"], c.get("started") or self.clock()
+        who = [c.get("client")]
         watch = self.guard.watch_match(host, port)
         if watch:
             sev = watch.get("severity") if watch.get("severity") in SEV_RANK else "medium"
             note = f" ({watch['note']})" if watch.get("note") else ""
             self._alert("watch", sev, host, port, f"Alert list host contacted: {host}",
-                        f"A {c['kind']} connection to {host}:{port} matches your alert list entry {watch['pattern']}{note}.")
+                        f"A {c['kind']} connection to {host}:{port} matches your alert list entry {watch['pattern']}{note}.", devices=who)
         if is_global_ip(host):
             self._alert("ip", "low", host, port, f"Direct connection to the address {host}",
-                        f"A program connected to the bare address {host}:{port} instead of a host name.")
+                        f"A program connected to the bare address {host}:{port} instead of a host name.", devices=who)
         risky = RISKY_PORTS.get(port)
         if risky:
             self._alert("port", risky[0], host, port, f"Connection to port {port}",
-                        f"Port {port} is {risky[1]}. A {c['kind']} connection to {host}:{port} was made.")
-        self._lookalike(host, port)
-        self._record_start(host, port, now)
-        self._dga(host, port, now)
+                        f"Port {port} is {risky[1]}. A {c['kind']} connection to {host}:{port} was made.", devices=who)
+        self._lookalike(host, port, who)
+        self._record_start(host, port, now, c.get("client"))
+        self._dga(host, port, now, c.get("client"))
 
     def on_fail(self, c):
-        host, now = c["host"], c.get("ended") or self.clock()
+        host, now, who = c["host"], c.get("ended") or self.clock(), c.get("client")
         with self.lock:
             q = self.fails[host]
             q.append(now)
             while q and now - q[0] > self.params["fail_window"]:
                 q.popleft()
             n = len(q)
-            self.fail_hosts.append((now, host))
-            recent = {h for t, h in self.fail_hosts if now - t <= self.params["scan_window"]}
+            wq = self.fail_clients[host]
+            wq.append((now, who))
+            while wq and now - wq[0][0] > self.params["fail_window"]:
+                wq.popleft()
+            host_who = {w for _t, w in wq}
+            self.fail_hosts.append((now, host, who))
+            window = [(h, w) for t, h, w in self.fail_hosts if now - t <= self.params["scan_window"]]
+            recent = {h for h, _w in window}
+            many_who = {w for _h, w in window}
         if n >= self.params["fail_count"]:
             self._alert("failures", "low", host, c["port"], f"{host} keeps failing",
-                        f"{n} connection attempts to {host} failed in the last {fmt_span(self.params['fail_window'])}. Last error: {str(c.get('error') or 'unknown')[:120]}")
+                        f"{n} connection attempts to {host} failed in the last {fmt_span(self.params['fail_window'])}. Last error: {str(c.get('error') or 'unknown')[:120]}",
+                        devices=host_who)
         if len(recent) >= self.params["scan_hosts"]:
             self._alert("failures", "medium", "(many hosts)", 0, "Many different hosts failed at once",
                         f"{len(recent)} different hosts could not be reached within {fmt_span(self.params['scan_window'])}. "
-                        "That can be a program scanning for a reachable server, or a list of dead addresses.")
+                        "That can be a program scanning for a reachable server, or a list of dead addresses.", devices=many_who)
 
     def on_end(self, c):
         host, now = c["host"], c.get("ended") or self.clock()
@@ -566,7 +586,7 @@ class Detector:
         if up or down:
             with self.lock:
                 q = self.traffic[host]
-                q.append((now, up, down))
+                q.append((now, up, down, c.get("client")))
                 while q and now - q[0][0] > self.params["exfil_window"]:
                     q.popleft()
             self._exfil(host, c["port"], now)
@@ -578,29 +598,34 @@ class Detector:
         if now - self._last_sweep < self.params["sweep_every"]:
             return
         self._last_sweep = now
-        by_host = collections.defaultdict(lambda: [0, 0, 0])
+        by_host = collections.defaultdict(lambda: [0, 0, 0, set()])
         for c in active:
             agg = by_host[c["host"]]
             agg[0] += c.get("up", 0)
             agg[1] += c.get("down", 0)
             agg[2] = c["port"]
-        for host, (up, down, port) in by_host.items():
-            self._exfil(host, port, now, extra=(up, down))
+            agg[3].add(c.get("client"))
+        for host, (up, down, port, who) in by_host.items():
+            self._exfil(host, port, now, extra=(up, down), extra_devices=who)
         with self.lock:
             for key in [k for k, q in self.starts.items() if not q or now - q[-1] > self.params["beacon_window"]]:
                 del self.starts[key]
+                self.start_clients.pop(key, None)
             for host in [h for h, q in self.traffic.items() if not q or now - q[-1][0] > self.params["exfil_window"]]:
                 del self.traffic[host]
             for host in [h for h, q in self.fails.items() if not q or now - q[-1] > self.params["fail_window"]]:
                 del self.fails[host]
+                self.fail_clients.pop(host, None)
 
     # -- rules
-    def _record_start(self, host, port, now):
+    def _record_start(self, host, port, now, client=None):
         p = self.params
         with self.lock:
             q = self.starts[(host, port)]
             q.append(now)
+            self.start_clients[(host, port)].append(client)
             times = [t for t in q if now - t <= p["beacon_window"]]
+            who = set(list(self.start_clients[(host, port)])[-len(times):])
         if len(times) < p["beacon_min"]:
             return
         gaps = [b - a for a, b in zip(times, times[1:])]
@@ -615,46 +640,49 @@ class Detector:
         self._alert("beacon", severity, host, port, f"{host} is contacted on a fixed schedule",
                     f"{len(times)} connections to {host}:{port}, one about every {fmt_span(mean)} "
                     f"({'almost to the second' if std < 0.15 else 'give or take ' + fmt_span(std)}), "
-                    f"over {fmt_span(times[-1] - times[0])}. Ordinary browsing is not this regular.")
+                    f"over {fmt_span(times[-1] - times[0])}. Ordinary browsing is not this regular.", devices=who)
 
-    def _exfil(self, host, port, now, extra=(0, 0)):
+    def _exfil(self, host, port, now, extra=(0, 0), extra_devices=()):
         p = self.params
         with self.lock:
             rows = [r for r in self.traffic.get(host, ()) if now - r[0] <= p["exfil_window"]]
+        who = {r[3] for r in rows} | set(extra_devices)
         up = sum(r[1] for r in rows) + extra[0]
         down = sum(r[2] for r in rows) + extra[1]
         if up >= p["exfil_bytes"] and up >= p["exfil_ratio"] * max(down, 1):
             self._alert("exfil", "high", host, port, f"Large upload to {host}",
                         f"{up / MB:.1f} MB sent to {host} in the last {fmt_span(p['exfil_window'])} against {down / MB:.1f} MB received "
-                        f"(about {up / max(down, 1):.0f} times more going out than coming in).")
+                        f"(about {up / max(down, 1):.0f} times more going out than coming in).", devices=who)
 
-    def _dga(self, host, port, now):
+    def _dga(self, host, port, now, client=None):
         p = self.params
         if is_ip(host) or host.endswith(COMMON_SUFFIXES) or not looks_random(second_label(host)):
             return
         reg = registrable(host)
         with self.lock:
-            self.randoms.append((now, reg, host))
+            self.randoms.append((now, reg, host, client))
             recent = {}
-            for t, r, h in self.randoms:
+            who = set()
+            for t, r, h, w in self.randoms:
                 if now - t <= p["dga_window"]:
                     recent.setdefault(r, h)
+                    who.add(w)
         if len(recent) >= p["dga_count"]:
             examples = ", ".join(list(recent)[:3])
             self._alert("dga", "medium", "(many names)", 0, "Many random-looking host names",
                         f"{len(recent)} different hosts with machine-generated looking names in {fmt_span(p['dga_window'])}, "
-                        f"for example {examples}. Malware sometimes tries names like these to find its server.")
+                        f"for example {examples}. Malware sometimes tries names like these to find its server.", devices=who)
 
-    def _lookalike(self, host, port):
+    def _lookalike(self, host, port, who=()):
         if is_ip(host):
             return
         labels = host.split(".")
         if any(l.startswith("xn--") for l in labels):
             self._alert("lookalike", "low", host, port, f"International name: {host}",
-                        "This host name uses international (punycode) characters, which can imitate a familiar site.")
+                        "This host name uses international (punycode) characters, which can imitate a familiar site.", devices=who)
         elif max(len(l) for l in labels) >= 40 or len(host) >= 80:
             self._alert("lookalike", "low", host, port, "Unusually long host name",
-                        f"{host[:100]} is {len(host)} characters long; very long names are sometimes used to hide the real host.")
+                        f"{host[:100]} is {len(host)} characters long; very long names are sometimes used to hide the real host.", devices=who)
 
 
 # ── the whole thing ──────────────────────────────────────────────────────────

@@ -60,7 +60,11 @@ tunnel service the other wrappers rely on.
   closes, how long its tunnel took to set up, the bytes each way and the hosts
   you use most. A route card shows the chain of hops with the direct round-trip
   time to each. A host can be marked **Keep ready**, so its first connection
-  starts at once.
+  starts at once. Every connection also shows the **device** that made it, by
+  its network address, with the computer the proxy runs on named as such. The
+  Connections filter finds a device by address, and selecting a host on the
+  Hosts tab lists the devices that used it and how much each sent and received.
+  Devices behind a router that rewrites addresses appear as the router.
 - **Browser** gives the proxy address with copy buttons, a connection test, and
   **Open *browser* through ZTR**. It lists the browsers it finds — Firefox,
   Chromium, Chrome, Brave, Edge and Vivaldi, including Snap and Flatpak
@@ -77,7 +81,8 @@ tunnel service the other wrappers rely on.
   about without blocking them. Detection rules flag regular beaconing, far
   more data sent than received, bursts of random-looking names, remote-access
   ports, direct-to-address connections and repeated failures; every alert shows
-  the evidence behind it, and a host you recognise can be marked trusted.
+  the evidence behind it and the devices whose connections caused it, and a
+  host you recognise can be marked trusted.
 - **Rules** say what to do when a host name contains some text: block it, alert
   you, or trust it. `tracker` matches `ad-tracker.net` and `tracker.example.com`;
   the text needs at least three characters. As you type, the page shows which
