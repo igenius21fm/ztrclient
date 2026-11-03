@@ -64,7 +64,11 @@ tunnel service the other wrappers rely on.
   its network address, with the computer the proxy runs on named as such. The
   Connections filter finds a device by address, and selecting a host on the
   Hosts tab lists the devices that used it and how much each sent and received.
-  Devices behind a router that rewrites addresses appear as the router.
+  For a device on the same network as the proxy's computer, the hardware (MAC)
+  address is shown too, read from the system's neighbour table without sending
+  anything; many phones and laptops use a private, per-network address, which
+  the details point out. Devices behind a router that rewrites addresses appear
+  as the router, with no MAC of their own.
 - **Browser** gives the proxy address with copy buttons, a connection test, and
   **Open *browser* through ZTR**. It lists the browsers it finds — Firefox,
   Chromium, Chrome, Brave, Edge and Vivaldi, including Snap and Flatpak

@@ -71,6 +71,7 @@ MASK = {"on": False}
 _NOT_HOSTS = {"ztr", "json", "py", "pem", "txt", "png", "log", "db", "conf", "sh", "md", "html", "js", "css", "desktop", "cfg", "ini", "sig"}
 _HOST_TOKEN = re.compile(r"(?<![\w.@-])(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?\.)+[A-Za-z]{2,24}(?![\w-])")
 _IPV4_TOKEN = re.compile(r"(?<![\w.])(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\w.])")
+_MAC_TOKEN = re.compile(r"(?<![0-9A-Fa-f:])([0-9A-Fa-f]{2})(?::[0-9A-Fa-f]{2}){5}(?![0-9A-Fa-f:])")
 _CONTAINS_TOKEN = re.compile(r"(contains:)([A-Za-z0-9_.-]+)")
 _DOTS = "\u2022\u2022\u2022"
 
@@ -96,6 +97,18 @@ def device_text(ip, own=()):
     return f"{ip} (this computer)" if ip in own else ip
 
 
+def mac_note(mac):
+    """A hardware address as shown in details, flagged when it is one a device made up for this network (many phones and
+    laptops do, so it won't match the sticker or a manufacturer's list)."""
+    if not mac:
+        return ""
+    try:
+        private = bool(int(mac.split(":")[0], 16) & 2)
+    except ValueError:
+        private = False
+    return f"{mac} (private address)" if private else mac
+
+
 def devices_text(devices, own=()):
     """A short cell for the devices behind an alert: the address itself for one, a count for several."""
     devices = [d for d in devices if d]
@@ -110,6 +123,7 @@ def mask_text(text):
         return text
     text = str(text)
     text = _IPV4_TOKEN.sub(lambda m: f"{m.group(1)}.{_DOTS}.{_DOTS}.{_DOTS}", text)
+    text = _MAC_TOKEN.sub(lambda m: f"{m.group(1)}:" + ":".join([_DOTS] * 5), text)
     text = _CONTAINS_TOKEN.sub(lambda m: m.group(1) + mask_word(m.group(2)), text)
     return _HOST_TOKEN.sub(_mask_host_token, text)
 
@@ -1764,16 +1778,16 @@ def build_app():
             bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
             bar.columnconfigure(1, weight=1)
             self.filter_var = tk.StringVar()
-            Field(bar, compact=True, textvariable=self.filter_var, width=26, placeholder="Filter by host or device").grid(row=0, column=0, sticky="w")
+            Field(bar, compact=True, textvariable=self.filter_var, width=26, placeholder="Filter by host, device or MAC").grid(row=0, column=0, sticky="w")
             self.only_problems = tk.BooleanVar(value=False)
             Check(bar, text="Only problems", variable=self.only_problems).grid(row=0, column=2, padx=(14, 0))
             self.close_btn = Btn(bar, text="Close connection", style="Danger.TButton", command=self.close_selected, state="disabled")
             self.close_btn.grid(row=0, column=3, padx=(14, 0))
             Btn(bar, text="Close idle", style="Ghost.TButton", command=self.close_idle_now).grid(row=0, column=4, padx=(8, 0))
             Btn(bar, text="Clear history", style="Ghost.TButton", command=self.clear_history).grid(row=0, column=5, padx=(8, 0))
-            cols = [("time", "Time"), ("kind", "Type"), ("host", "Host"), ("device", "Device"), ("tunnel", "Tunnel"), ("setup", "Wait"),
-                    ("up", "Sent"), ("down", "Received"), ("state", "State")]
-            frame, self.conn_tree = make_tree(f, cols, (80, 80, 290, 200, 70, 70, 80, 90, 140), height=14,
+            cols = [("time", "Time"), ("kind", "Type"), ("host", "Host"), ("device", "Device"), ("mac", "MAC"), ("tunnel", "Tunnel"),
+                    ("setup", "Wait"), ("up", "Sent"), ("down", "Received"), ("state", "State")]
+            frame, self.conn_tree = make_tree(f, cols, (80, 80, 250, 190, 130, 60, 70, 80, 90, 140), height=14,
                                               anchors={"setup": "e", "up": "e", "down": "e"})
             frame.grid(row=1, column=0, sticky="nsew")
             self.conn_hint = tk.Label(frame, text="", bg=FIELD, fg=DIM, font=UI["body"], justify="center")
@@ -1964,7 +1978,7 @@ def build_app():
             bar.grid(row=1, column=0, sticky="ew", pady=(0, 10))
             bar.columnconfigure(3, weight=1)
             self.alert_search = tk.StringVar()
-            Field(bar, compact=True, textvariable=self.alert_search, width=22, placeholder="Search host, device or text").grid(row=0, column=0, sticky="w")
+            Field(bar, compact=True, textvariable=self.alert_search, width=22, placeholder="Search host, device, MAC or text").grid(row=0, column=0, sticky="w")
             self.rule_var = tk.StringVar(value="All rules")
             rc = Combo(bar, compact=True, textvariable=self.rule_var, state="readonly", width=18,
                        values=["All rules"] + [spec[0] for spec in ztr_proxy_guard.RULES.values()])
@@ -2029,7 +2043,7 @@ def build_app():
                     continue
                 if sev and a["severity"] != sev:
                     continue
-                if text and text not in f"{a['host']} {a['title']} {a['evidence']} {' '.join(a.get('devices', []))}".lower():
+                if text and text not in f"{a['host']} {a['title']} {a['evidence']} {' '.join(a.get('devices', []))} {' '.join(a.get('macs', {}).values())}".lower():
                     continue
                 rows.append(a)
             return rows
@@ -2088,7 +2102,7 @@ def build_app():
                 return
             self.alert_title.configure(text=mask_text(f"{a['severity'].title()} · {a['title']}"))
             own = self.snap.get("self_clients", ())
-            who = ", ".join(device_text(d, own) for d in a.get("devices", []))
+            who = ", ".join(device_text(d, own) + (f" · {mac_note(a['macs'][d])}" if a.get("macs", {}).get(d) else "") for d in a.get("devices", []))
             self.alert_evidence.configure(text=mask_text(a["evidence"] + (f"\nFrom {'device' if len(a['devices']) == 1 else 'devices'}: {who}." if who else "")))
             tail = f"First seen {fmt_clock(a['first'])}, last {fmt_clock(a['last'])}, {a['count']} time{'s' if a['count'] != 1 else ''}."
             if a["action"]:
@@ -2159,8 +2173,10 @@ def build_app():
         def copy_alert(self):
             a = self.selected_alert()
             if a:
+                macs = a.get("macs", {})
+                who = ", ".join(d + (" (" + macs[d] + ")" if macs.get(d) else "") for d in a.get("devices", []))
                 self.copy(f"[{a['severity'].upper()}] {a['title']}\n{a['evidence']}\nhost: {a['host']}:{a['port']}  rule: {a['rule']}  "
-                          f"{'devices: ' + ', '.join(a.get('devices', [])) + '  ' if a.get('devices') else ''}seen {a['count']}x  first {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['first']))}  "
+                          f"{'devices: ' + who + '  ' if who else ''}seen {a['count']}x  first {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['first']))}  "
                           f"last {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(a['last']))}", "Alert copied")
 
         def export_alerts(self):
@@ -2867,17 +2883,17 @@ def build_app():
             self.setup_note.configure(text=(f"{len(snap['setup_series'])} tunnels · {c.get('retries', 0)} retried" if snap["setup_series"] else ""))
             self.rate_note.configure(text="")
             rows = self.connection_rows(limit=8)
-            sync_tree(self.mini_tree, [(f"o{r[0]}", (r[1], r[2], r[3], r[4], r[6], r[8], r[9]), r[10]) for r in rows])
+            sync_tree(self.mini_tree, [(f"o{r[0]}", (r[1], r[2], r[3], r[4], r[7], r[9], r[10]), r[11]) for r in rows])
 
         # ── connections ──────────────────────────────────────────────────
         def connection_rows(self, limit=None, text="", only_problems=False):
-            """[(id, time, type, host, device, tunnel, setup, up, down, state, tags)] — open ones first, then the most recent."""
+            """[(id, time, type, host, device, mac, tunnel, setup, up, down, state, tags)] — open ones first, then the most recent."""
             now = time.time()
             own = self.snap.get("self_clients", ())
             out = []
             allc = sorted(self.snap["active"], key=lambda c: -c["started"]) + self.snap["recent"]
             for i, c in enumerate(allc):
-                if text and text.lower() not in f"{c['host']} {c['detail']} {c.get('client', '')} {device_text(c.get('client'), own)}".lower():
+                if text and text.lower() not in f"{c['host']} {c['detail']} {c.get('client', '')} {device_text(c.get('client'), own)} {c.get('mac', '')}".lower():
                     continue
                 failed = c["state"] == "failed"
                 if only_problems and not (failed or c["state"] == "blocked"):
@@ -2897,7 +2913,7 @@ def build_app():
                 tunnel = "—" if c["kind"] == "HTTP" else ("ready" if c["warm"] else "new") if c["setup"] is not None else "…"
                 host = f"{c['host']}:{c['port']}" if c["kind"] != "HTTP" else c["host"] + (f"  {c['detail'].split(' ', 1)[1][:40]}" if c["detail"] else "")
                 row_tags = tuple(tags) + (("warm",) if c["warm"] and c["state"] != "failed" and c["kind"] != "HTTP" and not tags else ())
-                out.append((c["id"], fmt_clock(c["started"]), c["kind"], host, device_text(c.get("client"), own), tunnel, fmt_seconds(c["setup"]), human_bytes(c["up"]),
+                out.append((c["id"], fmt_clock(c["started"]), c["kind"], host, device_text(c.get("client"), own), c.get("mac") or "—", tunnel, fmt_seconds(c["setup"]), human_bytes(c["up"]),
                             human_bytes(c["down"]), state, row_tags + (("odd",) if i % 2 else ())))
                 if limit and len(out) >= limit:
                     break
@@ -2906,7 +2922,7 @@ def build_app():
         def refresh_connections(self):
             rows = self.connection_rows(text=self.filter_var.get().strip(), only_problems=self.only_problems.get())
             sel = self.conn_tree.selection()
-            sync_tree(self.conn_tree, [(f"c{r[0]}", r[1:10], r[10]) for r in rows[:400]])
+            sync_tree(self.conn_tree, [(f"c{r[0]}", r[1:11], r[11]) for r in rows[:400]])
             if rows:
                 self.conn_hint.place_forget()
             else:
@@ -2931,7 +2947,7 @@ def build_app():
                 return
             bits = [f"{c['kind']}  {c['host']}:{c['port']}"]
             if c.get("client"):
-                bits.append(f"From {device_text(c['client'], self.snap.get('self_clients', ()))}")
+                bits.append(f"From {device_text(c['client'], self.snap.get('self_clients', ()))}" + (f" · {mac_note(c['mac'])}" if c.get("mac") else ""))
             if c["detail"]:
                 bits.append(c["detail"])
             if c["setup"] is not None:
@@ -2978,7 +2994,8 @@ def build_app():
                 self.host_detail.configure(text=mask_text(f"No device has connected to {host} since the proxy started."))
                 return
             ordered = sorted(devices.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
-            lines = [f"{device_text(ip, own)} — {d['count']} visit{'s' if d['count'] != 1 else ''}, sent {human_bytes(d['up'])}, "
+            macs = self.snap.get("macs", {})
+            lines = [f"{device_text(ip, own)}{' · ' + mac_note(macs[ip]) if macs.get(ip) else ''} — {d['count']} visit{'s' if d['count'] != 1 else ''}, sent {human_bytes(d['up'])}, "
                      f"received {human_bytes(d['down'])}, last {fmt_clock(d['last'])}" for ip, d in ordered[:8]]
             if len(ordered) > 8:
                 lines.append(f"and {len(ordered) - 8} more")

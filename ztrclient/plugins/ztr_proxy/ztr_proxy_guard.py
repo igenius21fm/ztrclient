@@ -282,11 +282,12 @@ class AlertStore:
 
     MAX_DEVICES = 20
 
-    def add(self, rule, severity, host, port, title, evidence, action="", devices=()):
+    def add(self, rule, severity, host, port, title, evidence, action="", devices=(), macs=None):
         """Returns (alert, created, escalated). `devices` are the addresses of the devices whose connections caused it;
         repeats of the same finding add to the list."""
         now = self.clock()
         devices = [d for d in devices if d]
+        macs = {ip: mac for ip, mac in (macs or {}).items() if ip and mac}
         key = (rule, host, int(port or 0))
         with self._lock:
             aid = self._index.get(key)
@@ -294,7 +295,7 @@ class AlertStore:
             if alert is None:
                 alert = {"id": self._next, "rule": rule, "severity": severity, "host": host, "port": int(port or 0), "title": title,
                          "evidence": evidence, "count": 1, "first": now, "last": now, "state": "new", "action": action,
-                         "devices": sorted(set(devices))[:self.MAX_DEVICES]}
+                         "devices": sorted(set(devices))[:self.MAX_DEVICES], "macs": dict(macs)}
                 self._next += 1
                 self.items[alert["id"]] = alert
                 self._index[key] = alert["id"]
@@ -307,6 +308,7 @@ class AlertStore:
             alert["evidence"] = evidence
             alert["title"] = title
             alert["devices"] = sorted(set(alert.get("devices", ())) | set(devices))[:self.MAX_DEVICES]
+            alert["macs"] = {ip: m for ip, m in {**alert.get("macs", {}), **macs}.items() if ip in alert["devices"]}
             if escalated:
                 alert["severity"] = severity
                 if alert["state"] != "new":
@@ -383,10 +385,12 @@ class AlertStore:
         with self._lock:
             for a in data.get("alerts", []):
                 try:
+                    raw_macs = a.get("macs") if isinstance(a, dict) else None
                     a = {"id": int(a["id"]), "rule": a["rule"], "severity": a["severity"], "host": a["host"], "port": int(a["port"]),
                          "title": a["title"], "evidence": a["evidence"], "count": int(a["count"]), "first": float(a["first"]),
                          "last": float(a["last"]), "state": a["state"], "action": a.get("action", ""),
                          "devices": [str(d) for d in a.get("devices", []) if d][:self.MAX_DEVICES]}
+                    a["macs"] = {str(ip): str(m) for ip, m in (raw_macs.items() if isinstance(raw_macs, dict) else ()) if str(ip) in a["devices"] and m}
                 except (KeyError, TypeError, ValueError):
                     continue
                 if a["severity"] not in SEV_RANK or a["state"] not in ("new", "acknowledged", "dismissed"):
@@ -422,7 +426,8 @@ class AlertStore:
             w.writerow(cols)
             for a in rows:
                 w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a[c])) if c in ("first", "last")
-                            else " ".join(a.get("devices", [])) if c == "devices" else a[c] for c in cols])
+                            else " ".join(f"{ip} ({a['macs'][ip]})" if a.get("macs", {}).get(ip) else ip for ip in a.get("devices", [])) if c == "devices"
+                            else a[c] for c in cols])
         return len(rows)
 
 
@@ -506,6 +511,7 @@ class Detector:
         self.fail_hosts = collections.deque(maxlen=400)                                # (time, host, who)
         self._last_sweep = 0.0
         self.listeners = []   # called with (alert, created, escalated)
+        self.mac_for = lambda ip: ""   # set by the proxy: a client address -> its hardware address, when known
 
     # -- plumbing
     def _alert(self, rule, severity, host, port, title, evidence, devices=()):
@@ -518,7 +524,9 @@ class Detector:
                 and not self.guard.is_blocked(host, port)):
             self.guard.block(host, note=f"added automatically: {RULES[rule][0].lower()}", source="auto")
             action = "blocked automatically"
-        alert, created, escalated = self.store.add(rule, severity, host, port, title, evidence, action=action, devices=devices)
+        devices = [d for d in devices if d]
+        macs = {d: self.mac_for(d) for d in devices}
+        alert, created, escalated = self.store.add(rule, severity, host, port, title, evidence, action=action, devices=devices, macs=macs)
         for fn in list(self.listeners):
             try:
                 fn(alert, created, escalated)

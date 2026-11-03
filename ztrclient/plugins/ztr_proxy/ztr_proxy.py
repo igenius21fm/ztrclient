@@ -59,10 +59,12 @@ import http.server
 import ipaddress
 import itertools
 import os
+import re
 import select
 import socket
 import socketserver
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -125,6 +127,54 @@ def _status_text(text):
     return " ".join(str(text).split()).encode("latin-1", "replace").decode("latin-1")
 
 
+_MAC_FOUND, _MAC_MISSED = 120.0, 15.0   # how long a lookup result (or the lack of one) is reused, in seconds
+_mac_cache = {}                          # address -> (mac or "", looked up at)
+
+
+def _clean_mac(text):
+    """'ba:4:4b:cd:24:67' (macOS drops leading zeros) -> 'ba:04:4b:cd:24:67'; '' for anything that isn't a hardware address."""
+    parts = (text or "").strip().lower().replace("-", ":").split(":")
+    if len(parts) != 6 or not all(0 < len(p) <= 2 and all(c in "0123456789abcdef" for c in p) for p in parts):
+        return ""
+    mac = ":".join(p.zfill(2) for p in parts)
+    return "" if mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff") else mac
+
+
+def lookup_mac(ip, arp_table="/proc/net/arp"):
+    """The hardware (MAC) address of a device on this machine's own network, read from the system's neighbour table —
+    nothing is sent. Only a device on the same network segment has an entry; one behind another router shows the
+    router's address in the table, or none. Returns '' when it isn't known."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    if address.version != 4 or address.is_loopback:
+        return ""
+    now = time.time()
+    cached = _mac_cache.get(ip)
+    if cached and now - cached[1] < (_MAC_FOUND if cached[0] else _MAC_MISSED):
+        return cached[0]
+    mac = ""
+    try:
+        with open(arp_table) as table:
+            for line in list(table)[1:]:
+                fields = line.split()
+                if len(fields) >= 4 and fields[0] == ip and fields[2] != "0x0":
+                    mac = _clean_mac(fields[3])
+                    break
+    except OSError:
+        try:  # no /proc/net/arp (macOS, BSD): ask arp, which prints "... (192.168.1.5) at ba:4:4b:cd:24:67 on en0 ..."
+            out = subprocess.run(["arp", "-n", ip], capture_output=True, text=True, timeout=2).stdout
+            found = re.search(r"\bat\s+([0-9a-fA-F:-]{11,17})\b", out)
+            mac = _clean_mac(found.group(1)) if found else ""
+        except (OSError, subprocess.SubprocessError):
+            mac = ""
+    if len(_mac_cache) > 512:
+        _mac_cache.clear()
+    _mac_cache[ip] = (mac, now)
+    return mac
+
+
 class Telemetry:
     """What the proxy has been doing: counters, the connections open right now, the last few hundred that ended,
     per-host totals, a log, and two short time series. Nothing here affects how traffic is handled; a window (the GUI)
@@ -148,6 +198,7 @@ class Telemetry:
             self.hosts = {}
             self.host_devices = {}   # host -> client address -> {"count", "up", "down", "last"}
             self.self_clients = set()   # client addresses that turned out to be the machine the proxy runs on
+            self.device_macs = {}       # client address -> its hardware address, for devices on this machine's own network
             self.logs = collections.deque(maxlen=self.LOG_LINES)
             self.setup_series = collections.deque(maxlen=self.SERIES)   # (time, seconds to get a tunnel, warm?)
             self.rate_series = collections.deque(maxlen=self.SERIES)    # (time, bytes up in the last second, bytes down)
@@ -159,9 +210,10 @@ class Telemetry:
     def conn_start(self, kind, host, port, detail="", observe=True, client="", client_self=False):
         """`client` is the address of the device that made the connection; `client_self` says it is the machine the
         proxy runs on (the browser used 127.0.0.1 or this machine's own network address)."""
+        mac = lookup_mac(client) if client and not client_self else ""
         with self._lock:
             cid = next(self._ids)
-            record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "client": client,
+            record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "client": client, "mac": mac,
                       "client_self": bool(client_self), "state": "opening",
                       "started": time.time(), "setup": None, "warm": False, "up": 0, "down": 0,
                       "status": None, "error": None, "ended": None, "last_active": time.time(), "idle_closed": False}
@@ -169,6 +221,8 @@ class Telemetry:
             self.counters["connections"] += 1
             if client and client_self:
                 self.self_clients.add(client)
+            if client and mac:
+                self.device_macs[client] = mac
             snapshot = dict(record)
         if observe and self.guard:
             self.guard.on_start(snapshot)
@@ -324,6 +378,11 @@ class Telemetry:
             self.rate_series.append((now, (up - up0) / span, (down - down0) / span))
             self._sampled = (now, up, down)
 
+    def mac_of(self, ip):
+        """The hardware address last seen for a client address ('' if none)."""
+        with self._lock:
+            return self.device_macs.get(ip, "")
+
     def snapshot_active(self):
         with self._lock:
             return [dict(c) for c in self.active.values()]
@@ -337,6 +396,7 @@ class Telemetry:
                 "recent": [dict(c) for c in list(self.recent)[:200]],
                 "hosts": [dict(h) for h in self.hosts.values()],
                 "self_clients": sorted(self.self_clients),
+                "macs": dict(self.device_macs),
                 "host_devices": {host: {ip: dict(d) for ip, d in devices.items()} for host, devices in self.host_devices.items()},
                 "logs": list(self.logs)[-400:],
                 "setup_series": list(self.setup_series),
@@ -347,6 +407,7 @@ class Telemetry:
 TELEMETRY = Telemetry()
 GUARD = ztr_proxy_guard.Guard()
 TELEMETRY.guard = GUARD
+GUARD.detector.mac_for = TELEMETRY.mac_of
 
 
 def _log(message, level="info"):
