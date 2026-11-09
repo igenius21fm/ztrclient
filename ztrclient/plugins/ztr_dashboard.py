@@ -259,10 +259,15 @@ def run_ping(target_host, target_port=None, with_encryption=False, recipient_pub
         reason = f"{result.get('error_code')}: {result.get('error')}" if result else "no response from entry hop"
         return {"ok": False, "error": f"hop rejected the tunnel — {reason}"}
 
-    try:
+    def ping_once():
         with socket.create_connection((client.entry_hop, client.PORT), timeout=10) as sock:
             client.send_HTH(sock, b"PING", client.session_id)
-            response, _session_id = client.recv_HTH(sock)
+            return client.recv_HTH(sock)
+
+    try:
+        # A saved tunnel the relay no longer recognises (the address changed) is refreshed and tried once more,
+        # instead of showing the route as down until the saved authorization expires.
+        response, _session_id = client.call_with_recovery(ping_once) if hasattr(client, "call_with_recovery") else ping_once()
     except Exception as e:
         return {"ok": False, "error": f"PING failed: {e}"}
 

@@ -15,6 +15,7 @@ from pathlib import Path
 import sqlite3
 import logging
 import threading
+import weakref
 
 def sha256(msg: str):
     return hashlib.sha256(msg.encode()).hexdigest()
@@ -109,6 +110,14 @@ class TunnelError(ZTRClientError):
 
 class NetworkError(TunnelError):
     """Couldn't reach a hop, or lost the connection to one, over the network."""
+
+
+class StaleTunnelError(NetworkError):
+    """The entry hop dropped the very first reply without a single byte, on a tunnel that came from the local
+    cache. That is what a saved authorization looks like once the hops no longer recognise it — most often because
+    this computer's public address changed (the hop files each route under a hash of the client's address). The
+    cached authorization has already been forgotten, so the next set_tunnel() makes a fresh one; call_with_recovery()
+    does that and tries again for you."""
 
 
 class ProtocolError(TunnelError):
@@ -338,6 +347,14 @@ class RelayConfig:
         return self.get_ra_keys()["apk"]
 
 
+class _EarlyClose(ConnectionError):
+    """The peer closed (or reset) the connection; `got` is how many bytes of what we were reading had arrived."""
+
+    def __init__(self, got: int):
+        super().__init__("Socket connection closed before receiving full message.")
+        self.got = got
+
+
 def recv_exact(sock: socket.socket, length: int) -> bytes:
     """Helper function to reliably read an exact number of bytes from a socket."""
     data = bytearray()
@@ -517,6 +534,9 @@ class RelayClient(RelayConfig):
         self.debug=debug
         self.session_id = None
         self.tunnel_id = None
+        self.tunnel_from_cache = False      # True when the current tunnel is a saved authorization, not a fresh one
+        self._tunnel_args = (86400, True)   # (ttl, native) the current tunnel was made with
+        self._sock_state = weakref.WeakKeyDictionary()  # per connection: when its first frame went out, and whether anything came back
         self.worker_id = ""
         self.timing_defense = False
         self.secure_transport = False
@@ -751,11 +771,14 @@ class RelayClient(RelayConfig):
         self.set_log("request_hop_authorization")
         self.tunnel_id = self.create_tunnel_id(ttl=ttl, native=native)
         #1. Check SQLite Cache
+        self._tunnel_args = (ttl, native)
         cached_response, session_id = self.tunnel_cache.get(self.tunnel_id)
         if cached_response is not None:
             self.set_log(f"[CACHE HIT] Returning cached HRR authorization for tunnel {self.tunnel_id[:8]}...")
             self.session_id = session_id
+            self.tunnel_from_cache = True
             return cached_response
+        self.tunnel_from_cache = False
 
         self._shuffle_hops()
         finalDst = f"{self.TARGET_HOST}:{self.TARGET_PORT}"
@@ -823,7 +846,9 @@ class RelayClient(RelayConfig):
 
     def force_request_hop_authorization(self, ttl=86400,native=True, max_retries=5):
         for attempt in range(max_retries):
-            self.tunnel_cache.delete(self.tunnel_id)
+            # tunnel_id is only set once request_hop_authorization has run, so on a fresh client it was still None
+            # here and nothing was deleted: the "forced" request quietly returned the cached one. Work the id out first.
+            self.tunnel_cache.delete(self.create_tunnel_id(ttl=ttl, native=native))
 
             self.hops = [h for h in self.hops if h not in self.failed_hops]
             if len(self.hops) < 2:
@@ -848,6 +873,63 @@ class RelayClient(RelayConfig):
         else:
             self.set_log(f"[set_tunnel] Failed with error({result.get('error_code')}, {result.get('error')})")
         return result
+
+    # How soon after a frame goes out a silent close still counts as "the relay didn't recognise this session".
+    # A hop that has no record of a session closes at once; a real downstream failure takes round trips to happen.
+    STALE_WINDOW = 3.0
+
+    def forget_tunnel(self) -> None:
+        """Drop the saved authorization for the current tunnel, so the next set_tunnel() makes a fresh one."""
+        if self.tunnel_id:
+            try:
+                self.tunnel_cache.delete(self.tunnel_id)
+            except Exception as e:  # a cache that can't be written must not break the connection
+                _cache_logger.warning(f"tunnel cache delete failed for {self.tunnel_id[:8]}...: {e}")
+        self.tunnel_from_cache = False
+
+    def reauthorize(self) -> bool:
+        """Forget the saved authorization and ask the entry hop for a new one. The session id changes, so
+        connections opened before this are no longer valid: open a new one."""
+        ttl, native = self._tunnel_args
+        self.forget_tunnel()
+        result = self.set_tunnel(ttl=ttl, native=native)
+        return bool(result and result.get("status"))
+
+    def call_with_recovery(self, attempt):
+        """Run attempt() (open a connection, send, read the reply). If the relay turns it away as a stale saved
+        session, re-authorize and run it once more. attempt() must open its own connection each time: the session
+        id differs after re-authorizing."""
+        try:
+            return attempt()
+        except StaleTunnelError:
+            self.set_log("[recovery] the relay did not recognise the saved session; re-authorizing and trying once more")
+            if not self.reauthorize():
+                raise
+            return attempt()
+
+    def _note_sent(self, sock) -> None:
+        st = self._sock_state.get(sock)
+        if st is None:
+            self._sock_state[sock] = {"sent_at": time.monotonic(), "got": False}
+
+    def _read_header(self, sock, size):
+        data = bytearray()
+        while len(data) < size:
+            try:
+                packet = sock.recv(size - len(data))
+            except (ConnectionResetError, BrokenPipeError) as e:
+                raise _EarlyClose(len(data)) from e
+            if not packet:
+                raise _EarlyClose(len(data))
+            data.extend(packet)
+        return bytes(data)
+
+    def _looks_stale(self, sock, err) -> bool:
+        st = self._sock_state.get(sock)
+        return bool(
+            isinstance(err, _EarlyClose) and err.got == 0 and self.tunnel_from_cache and st
+            and not st["got"] and time.monotonic() - st["sent_at"] <= self.STALE_WINDOW
+        )
 
     def send_HTH(self,sock: socket.socket, payload: bytes, session_id:str, encrypt_payload=False, for_exit=False):
         """ Use this send your data. for_exit=True encrypts payload
@@ -876,6 +958,7 @@ class RelayClient(RelayConfig):
             except Exception as e:
                 raise CryptoError(f"failed to encrypt outgoing payload for the exit hop: {e}") from e
 
+        self._note_sent(sock)
         header = struct.pack(">I63s1s", len(payload), session_bytes, flag)
         # Send header (68 bytes total) + payload
         try:
@@ -889,17 +972,26 @@ class RelayClient(RelayConfig):
         HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
         try:
-            header_bytes = recv_exact(sock, HEADER_SIZE)
+            header_bytes = self._read_header(sock, HEADER_SIZE)
             # Flag is a hop-directed signal (see send_HTH's for_exit) — a
             # client never needs to act on one in what it receives back,
             # so it's read (to keep the header shape correct) and dropped.
             payload_len, session_bytes, _flag = struct.unpack(HEADER_FORMAT, header_bytes)
         except (OSError, ConnectionError) as e:
+            if self._looks_stale(sock, e):
+                self.forget_tunnel()  # so the very next set_tunnel() is a fresh authorization, even if the caller doesn't retry
+                raise StaleTunnelError(
+                    "the relay didn't recognise this saved session (your network address has probably changed); "
+                    "it has been refreshed, so try again"
+                ) from e
             raise NetworkError(f"connection dropped while receiving data over the tunnel: {e}") from e
         except struct.error as e:
             raise ProtocolError(f"malformed header received over the tunnel: {e}") from e
 
         session_id = session_bytes.decode("utf-8")
+        st = self._sock_state.get(sock)
+        if st:
+            st["got"] = True  # it answered, so this tunnel works
 
         try:
             payload = recv_exact(sock, payload_len)
