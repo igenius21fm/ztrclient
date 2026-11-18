@@ -474,14 +474,14 @@ class ProxySession(ztr_https.Session):
 
     # ---- opening tunnels
 
-    def _open_once(self, scheme, domain, port):
-        return super()._open_connection(scheme, domain, port)
+    def _open_once(self, scheme, domain, port, fresh=False):
+        return super()._open_connection(scheme, domain, port, fresh=fresh)
 
-    def _open_with_retry(self, scheme, domain, port):
+    def _open_with_retry(self, scheme, domain, port, fresh=False):
         """Opens a tunnel, trying again when a hop reports it couldn't reach the next one (see OPEN_ATTEMPTS)."""
         for attempt in range(1, OPEN_ATTEMPTS + 1):
             try:
-                return self._open_once(scheme, domain, port)
+                return self._open_once(scheme, domain, port, fresh=fresh)
             except TunnelError as e:
                 msg = str(e)
                 transient = msg.startswith("tunnel authorization failed") and (
@@ -524,8 +524,10 @@ class ProxySession(ztr_https.Session):
         return len(recent) >= WARM_MIN_USES
 
     def reopen_fresh(self, domain, port):
-        """A brand-new tunnel, never a spare — for replacing a spare that turned out to be dead."""
-        conn, client = self._open_with_retry("http", domain, port)
+        """A brand-new tunnel, never a spare — for replacing a tunnel that turned out to be dead (a stale warm
+        spare, or a saved authorization the hops have already expired). fresh=True so it forces a new
+        authorization instead of re-reading the same stale one from tunnel_cache.db."""
+        conn, client = self._open_with_retry("http", domain, port, fresh=True)
         conn.from_spare = False
         return conn, client
 
@@ -758,8 +760,14 @@ def splice(client_sock, conn, reopen=None, meter=None):
 
 
 def _splice_reopener(session, conn, host, port):
-    """A function that opens a replacement tunnel, if this connection came from the warm pool (else None)."""
-    if getattr(conn, "from_spare", False):
+    """A function that opens a replacement tunnel if this one may be one the hops no longer honour: a warm spare
+    that went stale, or a saved authorization from tunnel_cache.db that the hops have already expired (their
+    hrr_path can be dropped — by its own TTL, a restart or eviction — while the client's saved copy lives on, so
+    reusing it gets a silent close and, without this, no recovery). A genuinely fresh tunnel won't die unanswered
+    inside the recovery window, so offering it the reopener too is harmless. reopen_fresh forces a new
+    authorization, so the replacement is never the same stale saved session."""
+    client = getattr(conn, "_client", None) or getattr(conn, "client", None)
+    if getattr(conn, "from_spare", False) or getattr(client, "tunnel_from_cache", False):
         return lambda: session.reopen_fresh(host, port)
     return None
 

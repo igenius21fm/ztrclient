@@ -659,7 +659,12 @@ class Session:
                 context.load_cert_chain(self._cert)
         return context
 
-    def _open_connection(self, scheme: str, domain: str, port: int):
+    def _open_connection(self, scheme: str, domain: str, port: int, fresh: bool = False):
+        # fresh=True forces a brand-new authorization, bypassing (and replacing)
+        # the saved one in tunnel_cache.db. The recovery path uses it: a tunnel
+        # that dies before a single byte comes back is usually a saved session the
+        # hops have already expired, so re-reading the same cached session would
+        # just reopen the same dead tunnel. See ProxySession.reopen_fresh.
         # domain goes to RelayClient exactly as given, never resolved here
         # — see this module's own docstring for why. The exit hop resolves
         # it itself, over the registry, so no DNS lookup for this target
@@ -680,7 +685,7 @@ class Session:
         if self._with_timing_defense:
             client.with_timing_defense()
 
-        result = client.set_tunnel(ttl=self._ttl, native=False)
+        result = client.set_tunnel(ttl=self._ttl, native=False, reset=fresh)
         if not result or not result.get("status"):
             raise TunnelError(f"tunnel authorization failed for {domain}:{port}: {result}")
 
