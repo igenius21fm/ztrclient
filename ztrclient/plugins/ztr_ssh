@@ -10,8 +10,13 @@
 # from several terminals at once against the same or different targets
 # never collides on "port already in use".
 #
-#   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
+#   ztr_ssh [ssh_flags...] myuser@example._ztr --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
+#   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 ...   (the long form of the same thing)
 #   ztr_ssh --routes [--cp 2223]
+#
+# The SSH-style "user@host" is sugar: it is turned into "-l user --rh host" before anything else runs, so you can type
+# `ztr_ssh me@box._ztr` instead of `ztr_ssh -l me --rh box._ztr`. Only the form WITH an @ is a destination; a bare host
+# (no user) still goes through --rh, and ssh option values that contain an @ (a cipher, a ProxyJump) are left alone.
 #
 # --routes lists the routes in routes/ (exit country, status, hop health, entry and exit IP, how many sessions are using each)
 # and exits.
@@ -77,10 +82,16 @@ KEEP_HOST_KEY=0
 COPY_ID=0
 ROUTES=0
 SSH_ARGS=()
+DEST_USER=""      # the "user" of a user@host destination, turned into -l user
+DEST_GIVEN=0      # a destination was given positionally (user@host or host)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rh)
+      if [[ -n "$REAL_HOST" ]]; then
+        log_err "destination given twice — use either user@host / host or --rh, not both"
+        exit 1
+      fi
       REAL_HOST="$2"
       shift 2
       ;;
@@ -112,12 +123,49 @@ while [[ $# -gt 0 ]]; do
       ROUTES=1
       shift
       ;;
+    # ssh's single-letter options that take a value (space-separated form). Kept with their value so the value is
+    # never mistaken for the destination below — e.g. the `aes256-gcm@...` of `-c aes256-gcm@openssh.com`.
+    -[BbcDEeFIiJLlmOopQRSWw])
+      if [[ $# -ge 2 ]]; then SSH_ARGS+=("$1" "$2"); shift 2
+      else SSH_ARGS+=("$1"); shift; fi
+      ;;
+    # an SSH-style user@host destination — sugar for -l user --rh host. Only the user@host form (with the @) is taken
+    # as a destination; a bare word without @ stays an ssh argument, exactly as before.
+    *@*)
+      if [[ "$1" == -* ]]; then        # a flag that happens to contain @ (e.g. -o ProxyJump=u@h left attached)
+        SSH_ARGS+=("$1"); shift; continue
+      fi
+      if [[ -n "$REAL_HOST" || "$DEST_GIVEN" -eq 1 ]]; then
+        log_err "destination given twice — pass one user@host (or one --rh)"
+        exit 1
+      fi
+      DEST_GIVEN=1
+      DEST_USER="${1%%@*}"
+      REAL_HOST="${1#*@}"
+      if [[ -z "$DEST_USER" || -z "$REAL_HOST" || "$REAL_HOST" == *@* ]]; then
+        log_err "'$1' isn't a valid user@host"
+        exit 1
+      fi
+      shift
+      ;;
+    # everything else — ssh flags (and a bare host, which still needs --rh) — go straight to ssh.
     *)
       SSH_ARGS+=("$1")
       shift
       ;;
   esac
 done
+
+# user@host is sugar for -l user --rh host. Turn the user into -l, unless an explicit -l was also given.
+if [[ -n "$DEST_USER" ]]; then
+  for a in ${SSH_ARGS[@]+"${SSH_ARGS[@]}"}; do
+    if [[ "$a" == "-l" || "$a" == -l?* ]]; then
+      log_err "login user given twice — in user@host and with -l; use one or the other"
+      exit 1
+    fi
+  done
+  SSH_ARGS+=(-l "$DEST_USER")
+fi
 
 # --routes: a read-only look at routes/ — one line per .ztr, nothing secret. Sessions come from the tunnel service when it is running.
 if [[ "$ROUTES" -eq 1 ]]; then
@@ -184,7 +232,8 @@ PY
 fi
 
 if [[ -z "$REAL_HOST" ]]; then
-  log_err "Usage: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id | --routes]"
+  log_err "Usage: ztr_ssh [ssh_flags...] user@<._ztr alias or host> [--rp 22] [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id | --routes]"
+  log_err "   or: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 ...   (user@host is sugar for -l user --rh host; use --rh when there is no user)"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
   exit 1
 fi

@@ -126,6 +126,14 @@ ztr_forward --rh "example._ztr" --rp 5432
 ztr_forward --rh "example._ztr" --rp 5432 -- bash -c 'psql -h "$ZTR_LOCAL_IP" -p "$ZTR_LOCAL_PORT" -U myuser'
 ```
 
+For `ztr_ssh` you can write the destination the way `ssh` does, as
+`user@host` — it is just sugar for `-l user --rh host`, so
+`ztr_ssh me@example._ztr` is the same as `ztr_ssh -l me --rh "example._ztr"`.
+Only the form with an `@` is read as a destination; a bare host (no user)
+still goes through `--rh`, and ssh options whose value contains an `@` (a
+cipher, a `ProxyJump`) are left alone. It works with `--copy-id` too
+(`ztr_ssh --copy-id me@example._ztr`).
+
 All three take an optional `--config-file <name>.ztr` (`--config_file` works
 too): the filename of a config in `routes/`, used for just that session.
 Leave it off and the session goes through the route `ztr_tunnel_lp.py` was

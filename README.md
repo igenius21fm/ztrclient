@@ -250,7 +250,8 @@ step 3, these are already on your `PATH`. See
 (`ztr_forward`, `ztr_pg`) each actually do, flag by flag:
 
 ```bash
-ztr_ssh --rh "example._ztr" --rp 22
+ztr_ssh me@example._ztr --rp 22          # SSH-style; same as -l me --rh "example._ztr"
+ztr_ssh --rh "example._ztr" --rp 22      # the long form
 ```
 
 Or, writing your own script against `RelayClient` directly:
