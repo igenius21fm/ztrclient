@@ -333,7 +333,10 @@ to set up, which hosts you use most, and what each hop of the route costs you
 in time. A **Blocklist** refuses hosts before anything leaves your computer,
 and an **Alert list** and a set of detection rules flag behaviour that looks
 suspicious, such as connections at machine-regular intervals or far more data
-going out than coming in. Everything stays on your computer.
+going out than coming in. A **Sniffer** can watch the tunnel itself on the
+wire — the packets between your computer and the route's hops — read a flow's
+payloads, flag a lane that isn't encrypted, and hand the capture to Wireshark.
+Everything stays on your computer.
 
 ```bash
 ztr_proxy                    # open the window; the terminal comes straight back
@@ -342,7 +345,9 @@ ztr_proxy --start            # start the proxy as soon as the window opens
 ztr_proxy --cli --config-file NAME.ztr   # no window: run the proxy in this terminal
 ```
 
-HTTPS passes through untouched — the proxy never sees inside it. See
+Plain `http://` is upgraded to HTTPS by default, so nothing leaves the exit
+hop in the clear, and HTTPS passes through untouched — the proxy never sees
+inside it. See
 [plugins/README.md](ztrclient/plugins/README.md#ztr_proxy--the-browser-proxy)
 for every option and where its settings are kept. Runs on Linux and macOS.
 

@@ -41,6 +41,14 @@ never kept. HTTPS (`CONNECT`) and SOCKS5 are a blind byte relay — the TLS
 session runs between your program and the site, and the proxy never sees
 inside it. It can't inspect or alter that traffic.
 
+**HTTP is upgraded to HTTPS.** A plain `http://` request would cross the exit
+hop in the clear, so by default the proxy fetches the `https://` version of it
+over the tunnel and hands your program the real response — any client, `curl`
+included, gets the page, and nothing leaves the exit unencrypted. A site with
+no HTTPS won't load while this is on; turn it off in **Settings → Security →
+Upgrade HTTP to HTTPS** for such a site, and the window then marks each
+connection that went out in the clear.
+
 ## What you need
 
 - A route file in `routes/`.
@@ -103,6 +111,19 @@ tunnel service the other wrappers rely on.
   `203.•••.•••.•••`, so a screen share or a photo of the screen doesn't show what
   you visit. It changes only what is displayed: filters and the Copy buttons
   still use the real names, and traffic is untouched.
+- **Sniffer** watches the traffic between this computer and your route's hops —
+  the tunnel itself — on the wire, scoped to ZTR traffic (the control port and
+  the data lanes, nothing else on the machine). Each flow shows its hop, lane,
+  direction, bytes and timing; select one and **Inspect payload** opens its
+  on-the-wire bytes as hex, UTF-8, text or just the printable strings, with a
+  per-segment entropy read that tells ciphertext from plaintext at a glance. A
+  data lane whose body isn't encrypted is flagged, so a leak stands out. Save a
+  flow — or the whole capture — as a pcap, hex dump or raw bytes, or **Open in
+  Wireshark**. Capturing packets needs privilege: run as root, or grant the
+  Python binary `cap_net_raw` once (the tab shows the exact `setcap` command).
+  Without it the tab says so and the rest of the proxy is untouched. It needs
+  `scapy` (`pip install scapy`); nothing here sends a packet or changes what the
+  proxy does — it only reads.
 - **Log** shows what the proxy is doing, as it happens.
 
 ## Command-line options
@@ -145,3 +166,4 @@ Settings, the blocklist and the alerts are in `~/.config/ztr_proxy/`
 - `ztr_proxy.py` — the proxy itself.
 - `ztr_proxy_gui.py` — the window.
 - `ztr_proxy_guard.py` — the blocklist, alert list and detection rules.
+- `ztr_proxy_sniff.py` — the Sniffer's ZTR-traffic capture (Scapy).

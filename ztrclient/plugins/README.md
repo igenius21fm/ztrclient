@@ -419,7 +419,11 @@ you instead of your computer.
 client instead of being followed, and cookies pass straight through and are
 never kept. HTTPS (`CONNECT`) and SOCKS5 are a blind byte relay — the TLS
 session runs between your program and the site, and the proxy never sees
-inside it.
+inside it. By default a plain `http://` request is **upgraded to HTTPS** —
+fetched over the tunnel as `https://` and the real response returned — so
+nothing crosses the exit hop in the clear; turn it off in **Settings →
+Security** for a site that has no HTTPS, and cleartext connections are then
+flagged in the window.
 
 **The window.**
 
@@ -445,6 +449,13 @@ inside it.
   ports, direct-to-address connections and repeated failures; every alert
   shows the evidence behind it, and a host you recognise can be marked
   trusted.
+- **Sniffer** watches the tunnel on the wire (Scapy), scoped to ZTR traffic —
+  the control port and data lanes to your route's hops. Per flow: hop, lane,
+  direction, bytes, timing; "Inspect payload" opens a flow's on-the-wire bytes
+  as hex/UTF-8/text/strings with an entropy read, flags a data lane that isn't
+  ciphertext, and saves a flow or the whole capture as a pcap or straight into
+  Wireshark. Capturing needs root or `cap_net_raw` (the tab shows the command)
+  and `scapy`; it only reads.
 
 **Where things live.** Settings, the blocklist and the alerts are in
 `~/.config/ztr_proxy/` (`ZTR_PROXY_HOME` moves them). The window's log is at
