@@ -39,6 +39,7 @@ sys.path.insert(0, SCRIPT_DIR)
 
 import ztr_proxy  # noqa: E402
 import ztr_proxy_guard  # noqa: E402
+import ztr_proxy_sniff  # noqa: E402  — link-layer Scapy sniffer (optional; loads even without scapy)
 
 APP_NAME = "ZTR Proxy"
 TAGLINE = "Browser traffic through your ZTRelay route"
@@ -53,6 +54,7 @@ DEFAULT_SETTINGS = {
     "max_age": ztr_proxy.WARM_MAX_AGE, "timing": False, "autostart": False, "pinned": [], "quiet": True, "webrtc": True,
     "idle": 0,  # seconds a connection may sit quiet before it is closed; 0 = never
     "mask": False,  # show host names and addresses abbreviated on screen
+    "upgrade_http": True,  # redirect plain http:// to https:// instead of carrying it in the clear
 }
 
 BG, CARD, FIELD, BORDER = "#1c1c1e", "#262629", "#1a1a1c", "#3a3a3d"
@@ -580,42 +582,69 @@ def _png(width, height, rgba):
 
 
 def logo_png(size, supersample=3):
-    """A rounded square (blue to violet) with a ring and an arrow passing through it: traffic going through a gate."""
+    """ZTR Proxy's mark: a bold Z (for ZTR) drawn as a routed path — its three bends
+    are the relay hops your traffic passes through — on a rounded blue-to-teal badge.
+    The letter and the multi-hop route it travels, in one shape."""
     n = size * supersample
-    top, bottom = (10, 132, 255), (94, 92, 230)
+    # diagonal gradient, bright blue (top-left) into teal (bottom-right)
+    c_tl, c_br = (10, 120, 255), (46, 196, 236)
     out = bytearray(size * size * 4)
-    radius = 0.23
+    radius = 0.235
 
-    def rounded_cov(x, y):  # signed distance to a rounded square covering 0..1
+    def rounded_cov(x, y):  # inside a rounded square covering 0..1?
         qx, qy = abs(x - .5) - (.5 - radius), abs(y - .5) - (.5 - radius)
         outside = (max(qx, 0) ** 2 + max(qy, 0) ** 2) ** .5 + min(max(qx, qy), 0) - radius
         return outside <= 0
 
+    # the Z-route: top bar A→B, diagonal B→C, bottom bar C→D; B, M, C are the hops
+    A, B, C, D = (.265, .305), (.735, .305), (.265, .695), (.735, .695)
+    M = ((B[0] + C[0]) / 2, (B[1] + C[1]) / 2)
+    HALF = .031          # half the stroke width
+    NODE = .058          # hop-node radius (bulges past the stroke so the bends read as nodes)
+    HOLE = .022          # the lighter port at each node's centre
+
+    def _seg(x, y, p, q):
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((x - p[0]) * dx + (y - p[1]) * dy) / L2))
+        return ((x - p[0] - t * dx) ** 2 + (y - p[1] - t * dy) ** 2) ** .5
+
     def glyph(x, y):
-        d = ((x - .5) ** 2 + (y - .5) ** 2) ** .5
-        ring = abs(d - .27) <= .042
-        shaft = .16 <= x <= .80 and abs(y - .5) <= .036
-        head = x >= .74 and abs(y - .5) <= (.93 - x) * 0.95 and x <= .93
-        return ring or shaft or head
+        """Returns 1 for the white body of the Z, 0 for the badge, -1 for a node's
+        lighter centre port."""
+        stroke = _seg(x, y, A, B) <= HALF or _seg(x, y, B, C) <= HALF or _seg(x, y, C, D) <= HALF
+        dn = min(((x - p[0]) ** 2 + (y - p[1]) ** 2) ** .5 for p in (B, M, C))
+        if dn <= HOLE:
+            return -1
+        if stroke or dn <= NODE:
+            return 1
+        return 0
 
     for py in range(size):
         for px in range(size):
-            cover = white = 0
+            cover = white = port = 0
             for sy in range(supersample):
                 for sx in range(supersample):
                     x, y = (px * supersample + sx + .5) / n, (py * supersample + sy + .5) / n
                     if rounded_cov(x, y):
                         cover += 1
-                        if glyph(x, y):
+                        g = glyph(x, y)
+                        if g == 1:
                             white += 1
+                        elif g == -1:
+                            port += 1
             if not cover:
                 continue
-            t = py / max(1, size - 1)
-            base = [top[i] * (1 - t) + bottom[i] * t for i in range(3)]
-            mix = white / cover
-            rgb = [base[i] * (1 - mix) + 255 * mix for i in range(3)]
+            t = (px + py) / max(1, 2 * (size - 1))
+            base = [c_tl[i] * (1 - t) + c_br[i] * t for i in range(3)]
+            # the node ports are a brightened tint of the badge, not pure white, so they read as beads
+            port_rgb = [min(255, base[i] * .45 + 255 * .55) for i in range(3)]
+            wmix = white / cover
+            pmix = port / cover
+            rgb = [base[i] * (1 - wmix - pmix) + 255 * wmix + port_rgb[i] * pmix for i in range(3)]
             o = (py * size + px) * 4
-            out[o:o + 4] = bytes([int(rgb[0]), int(rgb[1]), int(rgb[2]), int(255 * cover / (supersample * supersample))])
+            out[o:o + 4] = bytes([int(max(0, min(255, rgb[0]))), int(max(0, min(255, rgb[1]))),
+                                  int(max(0, min(255, rgb[2]))), int(255 * cover / (supersample * supersample))])
     return _png(size, size, out)
 
 
@@ -1493,7 +1522,7 @@ def build_app():
     # ── the window ───────────────────────────────────────────────────────────────
 
     class App:
-        PAGES = [("overview", "Overview"), ("connections", "Connections"), ("hosts", "Hosts"), ("alerts", "Alerts"), ("rules", "Rules"), ("blocklist", "Blocklist"), ("browser", "Browser"), ("log", "Log")]
+        PAGES = [("overview", "Overview"), ("connections", "Connections"), ("hosts", "Hosts"), ("sniffer", "Sniffer"), ("alerts", "Alerts"), ("rules", "Rules"), ("blocklist", "Blocklist"), ("browser", "Browser"), ("log", "Log")]
 
         def __init__(self, root, route=None, autostart=False):
             self.root = root
@@ -1503,6 +1532,8 @@ def build_app():
                 self.settings["route"] = route
             self.tele = ztr_proxy.TELEMETRY
             self.service = None
+            self.sniffer = ztr_proxy_sniff.Sniffer()   # link-layer capture (Scapy); off until started
+            self.sniff_snap = {"running": False, "error": None}
             self.state = "stopped"          # stopped | starting | running
             self.events = queue.Queue()
             self.snap = self.tele.snapshot()
@@ -1666,6 +1697,7 @@ def build_app():
             self._build_overview(self.pages["overview"])
             self._build_connections(self.pages["connections"])
             self._build_hosts(self.pages["hosts"])
+            self._build_sniffer(self.pages["sniffer"])
             self._build_alerts(self.pages["alerts"])
             self._build_rules(self.pages["rules"])
             self._build_blocklist(self.pages["blocklist"])
@@ -1845,6 +1877,437 @@ def build_app():
             self.host_detail_card.grid(row=3, column=0, sticky="ew", pady=(10, 0))
             self.host_detail = ttk.Label(self.host_detail_card.body, text="Select a host to see which devices use it.", style="Dim.TLabel", wraplength=900, justify="left")
             self.host_detail.grid(row=0, column=0, sticky="w")
+
+        # ── sniffer (ZTR traffic, Scapy) ─────────────────────────────────
+        def _build_sniffer(self, f):
+            f.columnconfigure(0, weight=1)
+            f.rowconfigure(3, weight=1)
+            self._sniff_ifaces_loaded = False
+            self._payload_wins = {}
+
+            bar = ttk.Frame(f)
+            bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            bar.columnconfigure(7, weight=1)
+            ttk.Label(bar, text="Interface", style="Dim.TLabel").grid(row=0, column=0, padx=(0, 8))
+            self.sniff_iface = tk.StringVar(value=self.settings.get("sniff_iface") or "(any)")
+            self.sniff_iface_combo = Combo(bar, compact=True, textvariable=self.sniff_iface, state="readonly", width=15, values=["(any)"])
+            self.sniff_iface_combo.grid(row=0, column=1, sticky="w")
+            self.sniff_btn = Btn(bar, text="Start capture", style="Primary.TButton", command=self.toggle_sniffer)
+            self.sniff_btn.grid(row=0, column=2, padx=(10, 0))
+            self.sniff_inspect_btn = Btn(bar, text="Inspect payload", command=self._sniff_inspect_selected, state="disabled")
+            self.sniff_inspect_btn.grid(row=0, column=3, padx=(8, 0))
+            self.sniff_wireshark_btn = Btn(bar, text="Open in Wireshark", command=self._sniff_open_wireshark, state="disabled")
+            self.sniff_wireshark_btn.grid(row=0, column=4, padx=(8, 0))
+            self.sniff_on_connect_var = tk.BooleanVar(value=bool(self.settings.get("sniff_on_connect")))
+            Check(bar, text="Capture when the proxy connects", variable=self.sniff_on_connect_var, command=self._save_sniff_on_connect).grid(row=0, column=5, padx=(14, 0))
+            self.sniff_status = ttk.Label(bar, text="Stopped", style="Dim.TLabel")
+            self.sniff_status.grid(row=0, column=7, sticky="e")
+
+            self.sniff_insight_card = Card(f, radius=12, pad=(14, 9))
+            self.sniff_insight_card.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+            self.sniff_insight = ttk.Label(self.sniff_insight_card.body,
+                                           text="Capturing is off. Start it (or let it start with the proxy) to watch your ZTR tunnel on the wire.",
+                                           style="Dim.TLabel", wraplength=1040, justify="left")
+            self.sniff_insight.grid(row=0, column=0, sticky="w")
+
+            tiles = ttk.Frame(f)
+            tiles.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+            self.sniff_tiles = {}
+            specs = [("pkts", "Packets"), ("kept", "ZTR packets"), ("flows", "Flows"), ("rate", "Rate"),
+                     ("up", "To hops"), ("down", "From hops"), ("hops", "Hops")]
+            for i, (key, label) in enumerate(specs):
+                tiles.columnconfigure(i, weight=1, uniform="snifftile")
+                card = Card(tiles, radius=12, pad=(12, 8))
+                card.grid(row=0, column=i, sticky="ew", padx=(0, 8) if i < len(specs) - 1 else 0)
+                val = ttk.Label(card.body, text="—", style="Title.TLabel")
+                val.grid(row=0, column=0, sticky="w")
+                ttk.Label(card.body, text=label, style="Dim.TLabel").grid(row=1, column=0, sticky="w")
+                self.sniff_tiles[key] = val
+
+            cols = [("age", "Age"), ("kind", "Kind"), ("lane", "Lane"), ("crypto", "Payload"),
+                    ("hop", "Hop / peer"), ("port", "Port"), ("l4", "L4"), ("pkts", "Pkts"),
+                    ("up", "To hop"), ("down", "From hop")]
+            frame, self.sniff_tree = make_tree(f, cols, (54, 72, 96, 104, 150, 54, 42, 50, 84, 84), height=13,
+                                               anchors={"port": "e", "pkts": "e", "up": "e", "down": "e"}, stretch="hop")
+            frame.grid(row=3, column=0, sticky="nsew")
+            self.sniff_tree.bind("<<TreeviewSelect>>", lambda e: self._sniff_selected())
+            self.sniff_tree.bind("<Double-1>", lambda e: self._sniff_inspect_selected())
+
+            self.sniff_detail_card = Card(f, radius=12, pad=(14, 10))
+            self.sniff_detail_card.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+            self.sniff_detail = ttk.Label(self.sniff_detail_card.body,
+                                          text="This watches the traffic between this computer and your ZTRelay hops — the control port and the data lanes. "
+                                               "Select a flow and choose Inspect payload (or double-click it) to see its bytes on the wire and save them if you want. "
+                                               "ZTR frames are encrypted, so a lane's body is ciphertext; sizes, timing, lane and direction still tell you what the tunnel is doing.",
+                                          style="Dim.TLabel", wraplength=1040, justify="left")
+            self.sniff_detail.grid(row=0, column=0, sticky="w")
+
+        def _save_sniff_on_connect(self):
+            self.settings["sniff_on_connect"] = bool(self.sniff_on_connect_var.get())
+            save_settings(self.settings)
+
+        def _entry_hop_ips(self):
+            """The route's hop IPs — ZTR traffic is what goes to these. Literal addresses only."""
+            ips = set()
+            for _role, addr in route_chain(self.route_var.get()):
+                if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", addr or "") or ":" in (addr or ""):
+                    ips.add(addr)
+            return ips
+
+        def toggle_sniffer(self):
+            if self.sniffer.running:
+                self.stop_sniffer()
+            else:
+                self.start_sniffer(auto=False)
+
+        def start_sniffer(self, auto=False):
+            if self.sniffer.running:
+                return
+            iface = self.sniff_iface.get()
+            iface = None if iface in ("(any)", "(default)", "") else iface
+            self.settings["sniff_iface"] = self.sniff_iface.get()
+            save_settings(self.settings)
+            host, port = self.address()
+            ok = self.sniffer.start(iface=iface, bpf="", listen_host=host, listen_port=port,
+                                    hop_ips=self._entry_hop_ips(), ztr_only=True)
+            self._sniff_auto = auto
+            if not ok:
+                self.toast(self.sniffer.error or "Couldn't start the sniffer.", "error", 7000)
+            else:
+                self.toast("Capturing ZTR traffic", "ok", 1800)
+            self._sniff_set_btn()
+            if self.page == "sniffer":
+                self.refresh_sniffer()
+
+        def stop_sniffer(self):
+            self.sniffer.stop()
+            self._sniff_auto = False
+            self._sniff_set_btn()
+            self.toast("Capture stopped", "info", 1500)
+            if self.page == "sniffer":
+                self.refresh_sniffer()
+
+        def _sniff_set_btn(self):
+            on = self.sniffer.running
+            self.sniff_btn.configure(text="Stop capture" if on else "Start capture",
+                                     style="Danger.TButton" if on else "Primary.TButton")
+
+        def _sniffer_update_context(self):
+            if self.sniffer.running:
+                host, port = self.address()
+                self.sniffer.update_context(listen_host=host, listen_port=port, hop_ips=self._entry_hop_ips())
+
+        def _sniff_selected(self):
+            self.sniff_inspect_btn.configure(state="normal" if self.sniff_tree.selection() else "disabled")
+
+        def refresh_sniffer(self):
+            if not self._sniff_ifaces_loaded:
+                self._sniff_ifaces_loaded = True
+                try:
+                    self.sniff_iface_combo.inner.configure(values=["(any)"] + [i for i in self.sniffer.interfaces() if i])
+                except Exception:
+                    pass
+            snap = self.sniffer.snapshot()
+            self.sniff_snap = snap
+            running = bool(snap.get("running"))
+            self._sniff_set_btn()
+            if not running:
+                err = snap.get("error")
+                self.sniff_status.configure(text="Stopped")
+                self.sniff_insight.configure(
+                    text=(err or "Capturing is off. Start it (or let it start with the proxy) to watch your ZTR tunnel on the wire."),
+                    foreground=(RED if err else DIM))
+                for v in self.sniff_tiles.values():
+                    v.configure(text="—")
+                sync_tree(self.sniff_tree, [])
+                self.sniff_wireshark_btn.configure(state="disabled")
+                return
+
+            self.sniff_status.configure(text=f"Capturing ZTR traffic on {snap.get('iface')} · {fmt_elapsed(snap.get('elapsed', 0))}")
+            lvl, msg = snap.get("insight", ("info", ""))
+            self.sniff_insight.configure(text=msg, foreground={"ok": GREEN, "warn": AMBER, "info": DIM}.get(lvl, DIM))
+            self.sniff_tiles["pkts"].configure(text=f"{snap['pkts']:,}")
+            self.sniff_tiles["kept"].configure(text=f"{snap['kept']:,}")
+            self.sniff_tiles["flows"].configure(text=str(snap["flow_count"]))
+            self.sniff_tiles["rate"].configure(text=f"{snap['rate']:.0f}/s")
+            self.sniff_tiles["up"].configure(text=human_bytes(snap["up"]))
+            self.sniff_tiles["down"].configure(text=human_bytes(snap["down"]))
+            self.sniff_tiles["hops"].configure(text=str(len(snap.get("hops", []))))
+            self.sniff_wireshark_btn.configure(state="normal" if snap.get("flow_count") else "disabled")
+
+            rows = []
+            for i, r in enumerate(snap["flows"]):
+                if not r["ztr"] and r["tag"] == "direct":
+                    base = "failed"
+                elif r["kind"] == "control":
+                    base = "warm"
+                elif r["kind"] == "data":
+                    base = "open"
+                elif r["kind"] == "health":
+                    base = "dim"
+                else:
+                    base = ""
+                # a data lane that isn't ciphertext is the thing to catch — make it jump out
+                clevel = r.get("crypto_level")
+                if clevel == "bad":
+                    base = "failed"
+                elif clevel == "warn":
+                    base = "blocked"
+                tags = tuple(t for t in (base,) if t) + (("odd",) if i % 2 else ())
+                hop = r["hop"] + ((" · " + r["name"]) if r.get("name") else "")
+                rows.append((r["fid"], (f"{r['age']:.0f}s", r["kind"], r["lane"] or (r["proto"] if not r["ztr"] else ""),
+                                        r.get("crypto", "—"), hop, r["hop_port"] or "", r["l4"], r["pkts"],
+                                        human_bytes(r["up"]), human_bytes(r["down"])), tags))
+            sel = self.sniff_tree.selection()
+            sync_tree(self.sniff_tree, rows)
+            if sel and sel[0] in self.sniff_tree.get_children():
+                self.sniff_tree.selection_set(sel)
+            self._sniff_selected()
+            # keep any open payload windows fresh
+            for fid in list(self._payload_wins):
+                self._refresh_payload_viewer(fid)
+
+        def _sniff_inspect_selected(self):
+            sel = self.sniff_tree.selection()
+            if not sel:
+                self.toast("Select a flow first.", "warn", 1600)
+                return
+            self.open_payload_viewer(sel[0])
+
+        # -- Wireshark hand-off ---------------------------------------------
+        def _launch_wireshark(self, writer, descr="capture"):
+            """Write a pcap via writer(path)->packet_count, then open it in
+            Wireshark. Degrades to a clear message (pointing at Save as pcap)
+            when Wireshark isn't on the machine."""
+            import tempfile
+            ws = ztr_proxy_sniff.wireshark_path()
+            if not ws:
+                if ztr_proxy_sniff.tshark_path():
+                    msg = ("Only tshark was found, not the Wireshark app. Install Wireshark "
+                           "(wireshark.org), or use Save as pcap and open it yourself.")
+                else:
+                    msg = ("Wireshark isn't installed. Get it from wireshark.org, or use "
+                           "Save as pcap and open the file there.")
+                self.toast(msg, "warn", 7000)
+                return
+            try:
+                fd, path = tempfile.mkstemp(prefix="ztr_capture_", suffix=".pcap")
+                os.close(fd)
+                n = writer(path)
+            except Exception as e:
+                self.toast(f"Couldn't build the capture: {e}", "error", 6000)
+                return
+            if not n:
+                self.toast("Nothing captured yet to open.", "warn", 2600)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return
+            try:
+                kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if sys.platform != "win32":
+                    kw["start_new_session"] = True
+                subprocess.Popen([ws, "-r", path], **kw)
+                self.toast(f"Opening {n:,} packets of the {descr} in Wireshark…", "ok", 3000)
+            except Exception as e:
+                self.toast(f"Couldn't launch Wireshark: {e}", "error", 6000)
+
+        def _sniff_open_wireshark(self):
+            if not self.sniffer.running:
+                self.toast("Start the capture first.", "warn", 1800)
+                return
+            self._launch_wireshark(lambda p: self.sniffer.save_all(p), descr="whole ZTR capture")
+
+        # -- payload viewer window ------------------------------------------
+        def open_payload_viewer(self, fid):
+            from tkinter import filedialog
+            if fid in self._payload_wins:
+                try:
+                    self._payload_wins[fid]["win"].deiconify()
+                    self._payload_wins[fid]["win"].lift()
+                    return
+                except tk.TclError:
+                    self._payload_wins.pop(fid, None)
+            detail = self.sniffer.flow_detail(fid)
+            if not detail:
+                self.toast("That flow is no longer in the capture.", "warn", 2200)
+                return
+
+            win = tk.Toplevel(self.root)
+            win.title("ZTR payload")
+            win.configure(bg=BG)
+            win.geometry("940x620")
+            win.columnconfigure(0, weight=1)
+            win.rowconfigure(2, weight=1)
+
+            head = ttk.Label(win, text="", style="Dim.TLabel", justify="left", wraplength=900)
+            head.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 6))
+
+            note = ttk.Label(win, text="On-the-wire bytes. ZTR frames are encrypted, so the body is ciphertext — size, direction, lane and timing are the signal. "
+                                       "Nothing is written to disk unless you choose Save.",
+                             style="BgDim.TLabel", justify="left", wraplength=900)
+            note.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+
+            body = ttk.Frame(win)
+            body.grid(row=2, column=0, sticky="nsew", padx=14)
+            body.columnconfigure(0, weight=0)
+            body.columnconfigure(1, weight=1)
+            body.rowconfigure(0, weight=1)
+            scols = [("i", "#"), ("dir", "Direction"), ("size", "On wire"), ("plen", "Payload"), ("time", "Time")]
+            sframe, stree = make_tree(body, scols, (44, 96, 72, 74, 86), height=22,
+                                      anchors={"size": "e", "plen": "e"}, stretch="time")
+            sframe.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+            mono = tkfont.nametofont("TkFixedFont").copy()
+            mono.configure(size=10)
+            textwrap = ttk.Frame(body)
+            textwrap.grid(row=0, column=1, sticky="nsew")
+            textwrap.columnconfigure(0, weight=1)
+            textwrap.rowconfigure(1, weight=1)
+            modebar = ttk.Frame(textwrap)
+            modebar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+            modebar.columnconfigure(90, weight=1)
+            ttk.Label(modebar, text="View", style="Dim.TLabel").grid(row=0, column=0, padx=(0, 8))
+            mode_btns = {}
+
+            def set_mode(k):
+                v = self._payload_wins.get(fid)
+                if not v:
+                    return
+                v["mode"] = k
+                for key, b in mode_btns.items():
+                    b.configure(selected=(key == k))
+                v["text"].configure(wrap="none" if k in ("hex", "strings") else "word")
+                self._show_payload_segment(fid)
+
+            for i, (k, label) in enumerate((("hex", "Hex"), ("utf-8", "UTF-8"), ("text", "Text"), ("strings", "Strings"))):
+                b = Btn(modebar, text=label, kind="tab", selected=(k == "hex"), command=lambda key=k: set_mode(key))
+                b.grid(row=0, column=1 + i, padx=(0, 4))
+                mode_btns[k] = b
+            ent_lbl = ttk.Label(modebar, text="", style="Dim.TLabel")
+            ent_lbl.grid(row=0, column=91, sticky="e")
+            text = tk.Text(textwrap, bg=CARD, fg=TEAL, insertbackground=TEAL, bd=0, highlightthickness=0,
+                           wrap="none", font=mono, padx=10, pady=8)
+            text.grid(row=1, column=0, sticky="nsew")
+            txtbar = ttk.Scrollbar(textwrap, orient="vertical", command=text.yview, style="Thin.Vertical.TScrollbar")
+            txtbar.grid(row=1, column=1, sticky="ns")
+            text.configure(yscrollcommand=txtbar.set, state="disabled")
+
+            foot = ttk.Frame(win)
+            foot.grid(row=3, column=0, sticky="ew", padx=14, pady=10)
+            foot.columnconfigure(5, weight=1)
+
+            def do_save(fmt):
+                exts = {"pcap": ".pcap", "hex": ".txt", "raw": ".bin"}
+                safe = fid.replace("|", "_").replace(":", "-")
+                try:
+                    path = filedialog.asksaveasfilename(parent=win, defaultextension=exts[fmt],
+                                                        initialfile=f"ztr_{safe}{exts[fmt]}")
+                except tk.TclError:
+                    path = ""
+                if not path:
+                    return
+                try:
+                    n = self.sniffer.save_flow(fid, path, fmt)
+                    self.toast(f"Saved {n} {'packets' if fmt == 'pcap' else 'segments'} to {os.path.basename(path)}", "ok", 2600)
+                except Exception as e:
+                    self.toast(f"Couldn't save: {e}", "error", 5000)
+
+            def copy_view():
+                v = self._payload_wins.get(fid)
+                if not v:
+                    return
+                try:
+                    body = v["text"].get("1.0", "end-1c")
+                except tk.TclError:
+                    return
+                if body:
+                    self.copy(body, "Payload copied")
+
+            Btn(foot, text="Open in Wireshark", style="Primary.TButton",
+                command=lambda: self._launch_wireshark(lambda p: self.sniffer.save_flow(fid, p, "pcap"),
+                                                        descr="flow")).grid(row=0, column=0)
+            Btn(foot, text="Save as pcap", command=lambda: do_save("pcap")).grid(row=0, column=1, padx=(8, 0))
+            Btn(foot, text="Save hex dump", command=lambda: do_save("hex")).grid(row=0, column=2, padx=(8, 0))
+            Btn(foot, text="Save raw bytes", command=lambda: do_save("raw")).grid(row=0, column=3, padx=(8, 0))
+            Btn(foot, text="Copy view", command=copy_view).grid(row=0, column=4, padx=(8, 0))
+            self._sniff_live = tk.BooleanVar(value=True)
+            Check(foot, text="Live", variable=self._sniff_live).grid(row=0, column=5, sticky="e", padx=(12, 0))
+            Btn(foot, text="Close", command=win.destroy).grid(row=0, column=6, padx=(8, 0))
+
+            self._payload_wins[fid] = {"win": win, "head": head, "tree": stree, "text": text,
+                                       "samples": [], "live": self._sniff_live, "mode": "hex",
+                                       "mode_btns": mode_btns, "ent": ent_lbl}
+            win.protocol("WM_DELETE_WINDOW", lambda: (self._payload_wins.pop(fid, None), win.destroy()))
+            stree.bind("<<TreeviewSelect>>", lambda e: self._show_payload_segment(fid))
+            self._refresh_payload_viewer(fid)
+
+        def _refresh_payload_viewer(self, fid):
+            v = self._payload_wins.get(fid)
+            if not v:
+                return
+            try:
+                if not v["live"].get() and v["samples"]:
+                    return
+                detail = self.sniffer.flow_detail(fid)
+                if not detail:
+                    v["head"].configure(text="This flow has left the capture.")
+                    return
+                lane = detail["lane"] or detail["kind"]
+                v["head"].configure(text=f"{detail['kind'].upper()}  ·  {lane}  ·  hop {detail['hop']}:{detail['hop_port']}  "
+                                         f"·  local {detail['local']}  ·  {detail['pkts']} packets  "
+                                         f"·  {human_bytes(detail['up'])} to hop / {human_bytes(detail['down'])} from hop"
+                                         + (f"  ·  {detail['name']}" if detail.get('name') else ""))
+                samples = detail["samples"]
+                v["samples"] = samples
+                keep_sel = v["tree"].selection()
+                rows = []
+                for i, s in enumerate(samples):
+                    arrow = "↑ to hop" if s["dir"] == "up" else "↓ from hop"
+                    rows.append((str(i), (i, arrow, human_bytes(s["size"]), human_bytes(s["plen"]),
+                                          fmt_clock(s["ts"])), (("odd",) if i % 2 else ())))
+                sync_tree(v["tree"], rows)
+                if keep_sel and keep_sel[0] in v["tree"].get_children():
+                    v["tree"].selection_set(keep_sel)
+                elif rows and not keep_sel:
+                    last = rows[-1][0]
+                    v["tree"].selection_set(last)
+                    v["tree"].see(last)
+                    self._show_payload_segment(fid)
+            except tk.TclError:
+                self._payload_wins.pop(fid, None)
+
+        def _show_payload_segment(self, fid):
+            v = self._payload_wins.get(fid)
+            if not v:
+                return
+            sel = v["tree"].selection()
+            if not sel:
+                return
+            try:
+                idx = int(sel[0])
+                s = v["samples"][idx]
+            except (ValueError, IndexError):
+                return
+            dump = ztr_proxy_sniff.render_payload(s["data"], v.get("mode", "hex"))
+            t = v["text"]
+            t.configure(state="normal")
+            t.delete("1.0", "end")
+            t.insert("1.0", dump)
+            t.configure(state="disabled")
+            ent_lbl = v.get("ent")
+            if ent_lbl is not None:
+                try:
+                    data = s["data"]
+                    if data:
+                        ent = ztr_proxy_sniff.shannon_entropy(data)
+                        verdict = ztr_proxy_sniff.entropy_verdict(ent)
+                        color = GREEN if ent >= 7.5 else (AMBER if ent >= 6.0 else TEAL)
+                        ent_lbl.configure(text=f"entropy {ent:.2f}/8 · {verdict}", foreground=color)
+                    else:
+                        ent_lbl.configure(text="header only · no payload", foreground=DIM)
+                except tk.TclError:
+                    pass
 
         def _build_browser(self, f):
             f.columnconfigure((0, 1), weight=1, uniform="b")
@@ -2579,7 +3042,8 @@ def build_app():
             service = ztr_proxy.ProxyService(
                 s["route"], host=(s.get("host") or None), port=int(s["port"]), warm_pool=bool(s["warm"]),
                 warm_max_age=float(s["max_age"]), warm_min_uses=int(s["min_uses"]), timing_defense=bool(s["timing"]),
-                pinned=[tuple(p) for p in s.get("pinned", [])], idle_timeout=int(s.get("idle") or 0))
+                pinned=[tuple(p) for p in s.get("pinned", [])], idle_timeout=int(s.get("idle") or 0),
+                upgrade_http=bool(s.get("upgrade_http", True)))
 
             def work():
                 try:
@@ -2597,6 +3061,8 @@ def build_app():
             self.set_state("stopped")
             if service:
                 threading.Thread(target=service.stop, daemon=True).start()
+            if getattr(self, "_sniff_auto", False) and self.sniffer.running:
+                self.stop_sniffer()
             self.toast("Proxy stopped", "info", 1800)
 
         def set_state(self, state):
@@ -2804,6 +3270,10 @@ def build_app():
                     self.service = ev[1]
                     self.set_state("running")
                     self.toast(f"Proxy running on {self.service.host}:{self.service.port}", "ok")
+                    if self.settings.get("sniff_on_connect"):
+                        self.start_sniffer(auto=True)
+                    else:
+                        self._sniffer_update_context()
                 elif kind == "start_failed":
                     self.set_state("stopped")
                     self.toast(ev[1], "error", 6000)
@@ -2826,6 +3296,8 @@ def build_app():
                 self.refresh_connections()
             elif page == "hosts":
                 self.refresh_hosts()
+            elif page == "sniffer":
+                self.refresh_sniffer()
             elif page == "alerts":
                 self.refresh_alerts()
             elif page == "rules":
@@ -2913,6 +3385,10 @@ def build_app():
                 tunnel = "—" if c["kind"] == "HTTP" else ("ready" if c["warm"] else "new") if c["setup"] is not None else "…"
                 host = f"{c['host']}:{c['port']}" if c["kind"] != "HTTP" else c["host"] + (f"  {c['detail'].split(' ', 1)[1][:40]}" if c["detail"] else "")
                 row_tags = tuple(tags) + (("warm",) if c["warm"] and c["state"] != "failed" and c["kind"] != "HTTP" and not tags else ())
+                # a plain-HTTP request that was carried in the clear (upgrade off) — flag it amber
+                if c.get("insecure") and c["state"] not in ("failed", "blocked"):
+                    host = "⚠ cleartext · " + host
+                    row_tags = ("blocked",)
                 out.append((c["id"], fmt_clock(c["started"]), c["kind"], host, device_text(c.get("client"), own), c.get("mac") or "—", tunnel, fmt_seconds(c["setup"]), human_bytes(c["up"]),
                             human_bytes(c["down"]), state, row_tags + (("odd",) if i % 2 else ())))
                 if limit and len(out) >= limit:
@@ -2958,7 +3434,10 @@ def build_app():
                 bits.append(f"Refused before any tunnel was opened — it matches your blocklist entry {c['error'].split(': ', 1)[-1]}.")
             elif c["error"]:
                 bits.append(f"Failed: {c['error']}")
-            self.detail_label.configure(text=mask_text("\n".join(bits)), foreground=AMBER if c["state"] == "blocked" else (RED if c["error"] else TEXT))
+            if c.get("insecure"):
+                bits.append("⚠ Sent as plain HTTP — unencrypted past your exit hop. Turn the HTTP→HTTPS upgrade back on in Settings.")
+            self.detail_label.configure(text=mask_text("\n".join(bits)),
+                                        foreground=AMBER if (c["state"] == "blocked" or c.get("insecure")) else (RED if c["error"] else TEXT))
 
         def popup(self, tree, menu, event):
             row = tree.identify_row(event.y)
@@ -3322,6 +3801,7 @@ def build_app():
             uses = tk.StringVar(value=str(s["min_uses"]))
             age = tk.StringVar(value=str(int(s["max_age"])))
             timing = tk.BooleanVar(value=bool(s["timing"]))
+            upgrade = tk.BooleanVar(value=bool(s.get("upgrade_http", True)))
             auto = tk.BooleanVar(value=bool(s["autostart"]))
             idle = tk.StringVar(value=(str(int(s["idle"]) // 60) if int(s.get("idle") or 0) % 60 == 0 else str(round(int(s["idle"]) / 60, 1))) if s.get("idle") else "0")
             ttk.Label(body, text="Settings", style="H.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
@@ -3354,16 +3834,36 @@ def build_app():
             section(13, "Privacy")
             Check(body, text="Timing defense", variable=timing).grid(row=14, column=0, columnspan=2, sticky="w")
             hint(15, "The hops add random delays and decoy traffic to every tunnel, which makes traffic harder to match up — and slower.", indent=True)
-            section(16, "Window")
-            Check(body, text="Start the proxy when this window opens", variable=auto).grid(row=17, column=0, columnspan=2, sticky="w")
+            section(16, "Security")
+            upgrade_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=400, justify="left")
+            upgrade_hint.grid(row=18, column=0, columnspan=2, sticky="w", padx=(26, 0), pady=(2, 0))
+
+            def _sync_upgrade_hint():
+                if upgrade.get():
+                    upgrade_hint.configure(
+                        text="http:// sites are redirected to https:// so nothing crosses the exit hop in the clear. "
+                             "A site with no HTTPS won't load — turn this off only for such a site.",
+                        foreground=DIM)
+                else:
+                    upgrade_hint.configure(
+                        text="⚠ Off — plain http:// pages travel UNENCRYPTED out of your exit hop. Whoever runs the exit, "
+                             "or sits on the path beyond it, can read and change them. Leave this on unless you must.",
+                        foreground=AMBER)
+
+            Check(body, text="Upgrade HTTP to HTTPS (recommended)", variable=upgrade,
+                  command=_sync_upgrade_hint).grid(row=17, column=0, columnspan=2, sticky="w")
+            _sync_upgrade_hint()
+            section(19, "Window")
+            Check(body, text="Start the proxy when this window opens", variable=auto).grid(row=20, column=0, columnspan=2, sticky="w")
             note = ttk.Label(body, text="", style="Dim.TLabel")
-            note.grid(row=18, column=0, columnspan=2, sticky="w", pady=(12, 0))
+            note.grid(row=21, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
             def done():
                 try:
                     idle_seconds = int(round(float(idle.get().strip() or "0") * 60))
                     new = dict(s, port=int(port.get()), host=host.get().strip(), warm=warm.get(), min_uses=max(1, int(uses.get())),
-                               max_age=max(20, float(age.get())), timing=timing.get(), autostart=auto.get(), idle=idle_seconds)
+                               max_age=max(20, float(age.get())), timing=timing.get(), autostart=auto.get(), idle=idle_seconds,
+                               upgrade_http=bool(upgrade.get()))
                     if not 1 <= new["port"] <= 65535:
                         raise ValueError
                     if idle_seconds < 0 or 0 < idle_seconds < ztr_proxy.MIN_IDLE_TIMEOUT:
@@ -3373,17 +3873,21 @@ def build_app():
                     note.configure(text="The port, visits, seconds and minutes need to be numbers.", foreground=RED)
                     return
                 changed = any(new[k] != s[k] for k in ("port", "host", "warm", "min_uses", "max_age", "timing"))
+                upgrade_changed = new["upgrade_http"] != s.get("upgrade_http", True)
                 s.update(new)
-                if self.service is not None:  # the idle time applies at once, no restart needed
+                if self.service is not None:  # the idle time and the upgrade apply at once, no restart needed
                     self.service.idle_timeout = int(new["idle"])
+                    self.service.set_upgrade_http(new["upgrade_http"])
                 save_settings(s)
                 self.settings_win = None
                 win.destroy()
                 self.update_addresses()
+                if upgrade_changed and not new["upgrade_http"]:
+                    self.toast("HTTP→HTTPS upgrade is OFF — http:// sites now leave your exit hop unencrypted.", "warn", 6000)
                 if changed and self.state == "running":
                     self.toast("Restarting the proxy to apply the changes…", "info")
                     self.restart()
-            Btn(body, text="Done", style="Primary.TButton", command=done).grid(row=19, column=0, columnspan=2, sticky="e", pady=(18, 0))
+            Btn(body, text="Done", style="Primary.TButton", command=done).grid(row=22, column=0, columnspan=2, sticky="e", pady=(18, 0))
             win.bind("<Escape>", lambda e: (setattr(self, "settings_win", None), win.destroy()))
             win.bind("<Return>", lambda e: done())
             win.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, "settings_win", None), win.destroy()))

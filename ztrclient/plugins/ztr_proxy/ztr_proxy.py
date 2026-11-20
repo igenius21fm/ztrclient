@@ -68,7 +68,7 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PLUGINS_DIR = os.path.dirname(SCRIPT_DIR)
@@ -120,6 +120,11 @@ PIN_CHECK_EVERY = 5  # seconds
 # buffer, the connection is quietly re-authorized and the client's bytes replayed.
 RECOVERY_WINDOW = 3.0
 RECOVERY_BUFFER = 64 * 1024
+# A splice reads each tunnel with this timeout rather than blocking forever. It is NOT an idle limit — a healthy idle
+# tunnel whose read times out is simply polled again, never dropped — it only guarantees that when a connection is
+# being torn down (the client closed, or the idle reaper cut it), the tunnel-reading thread wakes and exits instead of
+# parking on a socket that a recovery swap may have left with no one to close it. Kept long so it almost never fires.
+SPLICE_POLL = 30.0
 
 
 def _status_text(text):
@@ -216,7 +221,8 @@ class Telemetry:
             record = {"id": cid, "kind": kind, "host": host, "port": port, "detail": detail, "client": client, "mac": mac,
                       "client_self": bool(client_self), "state": "opening",
                       "started": time.time(), "setup": None, "warm": False, "up": 0, "down": 0,
-                      "status": None, "error": None, "ended": None, "last_active": time.time(), "idle_closed": False}
+                      "status": None, "error": None, "ended": None, "last_active": time.time(), "idle_closed": False,
+                      "insecure": False}
             self.active[cid] = record
             self.counters["connections"] += 1
             if client and client_self:
@@ -227,6 +233,15 @@ class Telemetry:
         if observe and self.guard:
             self.guard.on_start(snapshot)
         return cid
+
+    def mark_insecure(self, cid):
+        """This connection carried a plain-HTTP request in the clear (the HTTP→HTTPS
+        upgrade is turned off). Flagged so the window can warn about it."""
+        with self._lock:
+            self.counters["insecure_http"] += 1
+            c = self.active.get(cid)
+            if c is not None:
+                c["insecure"] = True
 
     def conn_blocked(self, cid, entry):
         """The connection was refused because its host is on the blocklist (no tunnel was opened for it)."""
@@ -674,22 +689,25 @@ def splice(client_sock, conn, reopen=None, meter=None):
     replayed, and the client never notices. This happens at most once per connection.
 
     `meter(up, down)`, if given, is told how many bytes crossed in each direction as they do."""
-    conn.set_timeout(None)  # tunnels open with a read timeout; an idle but healthy connection must not be dropped
-    state = {"conn": conn, "buf": bytearray(), "overflow": False, "replied": False, "recovered": False}
+    conn.set_timeout(SPLICE_POLL)  # a long read poll, never None: an idle healthy tunnel is re-polled, never dropped,
+                                   # but no reader can block forever, so teardown always completes (see SPLICE_POLL)
+    state = {"conn": conn, "buf": bytearray(), "overflow": False, "replied": False,
+             "recovered": False, "closing": False}
     lock = threading.Lock()
     started = time.time()
+    torn = [False]
 
     def recover(dead):
         """True if `dead` has been (or just was) replaced by a fresh tunnel."""
         with lock:
             if state["conn"] is not dead:  # the other direction already swapped it
                 return True
-            if (reopen is None or state["recovered"] or state["replied"] or state["overflow"]
-                    or time.time() - started > RECOVERY_WINDOW):
+            if (state["closing"] or reopen is None or state["recovered"] or state["replied"]
+                    or state["overflow"] or time.time() - started > RECOVERY_WINDOW):
                 return False
             try:
                 fresh, _client = reopen()
-                fresh.set_timeout(None)
+                fresh.set_timeout(SPLICE_POLL)
                 if state["buf"]:
                     fresh.send(bytes(state["buf"]))
             except (ZTRClientError, ValueError, OSError):
@@ -699,7 +717,16 @@ def splice(client_sock, conn, reopen=None, meter=None):
         _close_tunnel(dead)
         return True
 
-    def close_client():
+    def teardown():
+        """Shut down both ends so a thread blocked on either wakes and the splice returns. Runs once; marks the
+        connection closing so no recovery resurrects a tunnel as it is being torn down."""
+        with lock:
+            if torn[0]:
+                return
+            torn[0] = True
+            state["closing"] = True
+            tunnel = state["conn"]
+        _close_tunnel(tunnel)
         try:
             client_sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -728,16 +755,20 @@ def splice(client_sock, conn, reopen=None, meter=None):
         except OSError:
             pass
         finally:
-            _close_tunnel(state["conn"])
+            teardown()
 
     def down():  # tunnel -> client
         try:
             while True:
                 with lock:
+                    if state["closing"]:
+                        break
                     current = state["conn"]
                 try:
                     chunk = current.recv(65536)
-                except (OSError, NetworkError):
+                except NetworkError:
+                    continue  # read poll expired on a healthy idle tunnel — re-check teardown, then keep waiting
+                except OSError:
                     chunk = b""
                 if chunk:
                     state["replied"] = True
@@ -750,7 +781,7 @@ def splice(client_sock, conn, reopen=None, meter=None):
         except OSError:
             pass
         finally:
-            close_client()
+            teardown()
 
     threads = [threading.Thread(target=up, daemon=True), threading.Thread(target=down, daemon=True)]
     for t in threads:
@@ -969,6 +1000,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             raise OverflowError
         return self.rfile.read(length) if length else None
 
+    @staticmethod
+    def _https_upgrade_url(parts):
+        """The https:// address for an http:// request: same host, path, query and
+        fragment; the default port 80 becomes 443, any other explicit port is kept."""
+        host = parts.hostname or parts.netloc
+        port = parts.port
+        if ":" in host and not host.startswith("["):   # bare IPv6 literal
+            host = f"[{host}]"
+        netloc = f"{host}:{port}" if (port and port not in (80, 443)) else host
+        return urlunsplit(("https", netloc, parts.path or "/", parts.query, parts.fragment))
+
     def _handle_proxied_request(self):
         parts = urlsplit(self.path)
         if not parts.scheme or not parts.netloc:
@@ -993,25 +1035,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _log(f"{self.command} {host} refused: on the blocklist ({blocked['pattern']})", "warn")
             self._refuse(blocked)
             return
-        cid = TELEMETRY.conn_start("HTTP", host, port, detail=f"{self.command} {parts.path or '/'}", client=client, client_self=client_self)
+        # A plain-HTTP request would cross the exit hop in the clear. By default we fetch the https:// version of it
+        # ourselves (over the encrypted tunnel) and hand the client the real response — a transparent upgrade, so any
+        # client, curl included, gets the page rather than a redirect it must follow. Only carry it unencrypted when
+        # the user has turned the upgrade off, and then flag it so the window can warn.
+        url = self.path
+        upgraded = False
+        if parts.scheme == "http" and getattr(self.server, "upgrade_http", True):
+            url = self._https_upgrade_url(parts)
+            parts = urlsplit(url)
+            host, port = parts.hostname or host, parts.port or 443
+            upgraded = True
+
+        detail = f"{self.command} {parts.path or '/'}" + ("  (upgraded to https)" if upgraded else "")
+        cid = TELEMETRY.conn_start("HTTP", host, port, detail=detail, client=client, client_self=client_self)
+        if upgraded:
+            TELEMETRY.note("upgraded_https")
+            _log(f"{self.command} http://{host}{parts.path or '/'} fetched over https (upgrade on)")
+        elif parts.scheme == "http":
+            TELEMETRY.mark_insecure(cid)
+            _log(f"{self.command} http://{host}{parts.path or '/'} sent in the CLEAR — the HTTP→HTTPS upgrade is off", "warn")
         TELEMETRY.add_bytes(cid, len(body or b""), 0)
         try:
-            self._relay_proxied_request(parts, body, cid)
+            self._relay_proxied_request(parts, body, cid, url=url, upgraded=upgraded)
         finally:
             TELEMETRY.conn_end(cid)
 
-    def _relay_proxied_request(self, parts, body, cid):
-
+    def _relay_proxied_request(self, parts, body, cid, url=None, upgraded=False):
+        url = url or self.path
         skip = _HOP_BY_HOP | _connection_listed(self.headers) | {"host", "content-length", "expect"}
         forwarded = {k: v for k, v in _merge_duplicates(self.headers.items()).items() if k.lower() not in skip}
 
         asked = time.time()
         try:
             result = self.server.session.request(
-                self.command, self.path, headers=forwarded, data=body, stream=True, allow_redirects=False,
+                self.command, url, headers=forwarded, data=body, stream=True, allow_redirects=False,
             )
         except (ZTRClientError, ValueError, OSError) as e:
             TELEMETRY.conn_fail(cid, e)
+            # An http→https upgrade that can't reach the site over https (no TLS there): say so clearly rather than a
+            # bare gateway error, and point at the toggle, instead of silently dropping back to cleartext.
+            if upgraded:
+                _log(f"{self.command} {url} failed after the https upgrade: {e}", "warn")
             self._gateway_error(e)
             return
 
@@ -1116,6 +1181,9 @@ class ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     # A browser opens many connections at once; the default listen queue of 5 makes the rest wait for a retransmitted
     # SYN (a full second) instead of being accepted at once.
     request_queue_size = 128
+    # When True, a plain-HTTP request is answered with a redirect to its https:// address instead of being carried
+    # in the clear. Set live by ProxyService. Always present so the handler can read it unconditionally.
+    upgrade_http = True
 
 
 DEFAULT_PORT = 8095
@@ -1127,9 +1195,10 @@ class ProxyService:
 
     def __init__(self, config_file, host=None, port=DEFAULT_PORT, warm_pool=True, warm_max_age=WARM_MAX_AGE,
                  warm_min_uses=WARM_MIN_USES, timing_defense=False, pinned=(), telemetry=None, session_factory=None,
-                 idle_timeout=0):
+                 idle_timeout=0, upgrade_http=True):
         self.config_file, self.host_arg, self.port = config_file, host, int(port)
         self.idle_timeout = idle_timeout  # seconds without traffic before a connection is closed; 0 = never. May be changed while running.
+        self.upgrade_http = bool(upgrade_http)  # redirect plain http:// to https://; may be changed while running
         self.warm_pool, self.warm_max_age, self.warm_min_uses = warm_pool, warm_max_age, warm_min_uses
         self.timing_defense, self.initial_pins = timing_defense, list(pinned)
         self.telemetry = telemetry or TELEMETRY
@@ -1142,6 +1211,12 @@ class ProxyService:
     @property
     def running(self):
         return self.httpd is not None
+
+    def set_upgrade_http(self, on):
+        """Turn the HTTP→HTTPS upgrade on or off while the proxy is running."""
+        self.upgrade_http = bool(on)
+        if self.httpd is not None:
+            self.httpd.upgrade_http = self.upgrade_http
 
     def start(self):
         if self.running:
@@ -1157,6 +1232,7 @@ class ProxyService:
             session.close()
             raise
         httpd.session = session
+        httpd.upgrade_http = self.upgrade_http
         self.session, self.httpd, self.host = session, httpd, host
         self._stop.clear()
         for domain, port in self.initial_pins:
