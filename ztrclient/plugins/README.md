@@ -23,8 +23,8 @@ for you.
 `ztr_isf/` is the client for an ISF (Intermediate Server Forwarder), a small
 server you run yourself so the route ends at your machine instead of the exit
 hop's choice of destination: `ztr_isf_client.py` (sessions, TCP and UDP,
-aliases), `ztr_isf_dashboard.py` (a local web page) and `isf_ssh`, which the
-installer puts on your `PATH` with the other commands. The wrappers
+aliases), `ztr_isf_dashboard.py` (a local web page) and `isf_ssh`; the
+installer puts `isf_ssh` and `ztr_isf_client` on your `PATH` with the other commands. The wrappers
 above, ZTR Fleet, Ferry, ZTR Requests and ZTR Proxy can all send traffic through
 an ISF. See [ztr_isf/README.md](ztr_isf/README.md).
 

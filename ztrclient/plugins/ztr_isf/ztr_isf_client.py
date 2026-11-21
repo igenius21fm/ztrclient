@@ -42,6 +42,27 @@ import sys
 import threading
 import time
 
+
+def _use_installer_venv():
+    """Started as a command with an interpreter that has no pycryptodome: run again under the ZTRelay installer's Python."""
+    if __name__ != "__main__":
+        return
+    try:
+        import Crypto  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if os.environ.get("ZTR_ISF_REEXEC"):
+        return
+    venv = os.environ.get("ZTR_VENV_DIR") or os.path.join(os.path.expanduser("~"), ".local", "share", "ztr", "ztr_venv")
+    py = os.path.join(venv, "bin", "python3")
+    if os.path.isfile(py):
+        os.environ["ZTR_ISF_REEXEC"] = "1"
+        os.execv(py, [py, os.path.realpath(__file__)] + sys.argv[1:])
+
+
+_use_installer_venv()
+
 from Crypto.Cipher import ChaCha20_Poly1305
 
 # ---- protocol constants (kept in step with server/src/proto.rs) -------------
@@ -204,7 +225,7 @@ def parse_ticket(ticket: str):
 # ---- locating ztrclient ------------------------------------------------------
 def locate_ztrclient(explicit: str = None) -> str:
     """Finds the directory holding ztrClient.py and puts it on sys.path."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = os.path.dirname(os.path.realpath(__file__))
     try:
         saved = Profiles().data.get("ztrclient_dir")  # also reads settings saved by earlier single-ISF versions
     except Exception:

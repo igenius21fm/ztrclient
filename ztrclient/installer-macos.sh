@@ -29,7 +29,7 @@
 # automatically and just take the flags/defaults given.
 #
 # What it actually does:
-#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy,ztr_fleet/ztr_fleet,ztr_isf/isf_ssh} executable — a zip
+#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy,ztr_fleet/ztr_fleet,ztr_isf/isf_ssh,ztr_isf/ztr_isf_client.py} executable — a zip
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
 #   2. Looks for a Python 3.12 or newer (ztrClient.py needs it — the python3
@@ -46,7 +46,7 @@
 #      --with-requests, also installs Pillow — ztr_requests/server.py needs
 #      it to sniff/decode image responses.
 #   3. Symlinks the wrappers into --prefix (default ~/.local/bin),
-#      so `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy`/`ztr_fleet`/`isf_ssh` work from any shell, not just
+#      so `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy`/`ztr_fleet`/`isf_ssh`/`ztr_isf_client` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: adds --local-ip (default 10.10.15.10) as an
 #      extra address on the loopback interface (`ifconfig lo0 alias`), so
@@ -87,7 +87,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$SCRIPT_DIR/plugins"
-WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy ztr_fleet isf_ssh)
+WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy ztr_fleet isf_ssh ztr_isf_client)
 
 # Where a wrapper's launcher script lives. Most sit directly in plugins/;
 # ZTR Proxy, ZTR Fleet and the ISF client keep all of their files in their own folders.
@@ -96,6 +96,7 @@ wrapper_path() {
     ztr_proxy) echo "$PLUGINS_DIR/ztr_proxy/ztr_proxy" ;;
     ztr_fleet) echo "$PLUGINS_DIR/ztr_fleet/ztr_fleet" ;;
     isf_ssh) echo "$PLUGINS_DIR/ztr_isf/isf_ssh" ;;
+    ztr_isf_client) echo "$PLUGINS_DIR/ztr_isf/ztr_isf_client.py" ;;
     *) echo "$PLUGINS_DIR/$1" ;;
   esac
 }
@@ -1076,4 +1077,4 @@ if [[ "$WITH_PROXY" -eq 1 ]]; then
   log_ok "and for the browser proxy: ztr_proxy   (or open ZTR Proxy from your Applications)"
 fi
 log_ok "and to run commands on several servers at once: ztr_fleet   (ztr_fleet --gui opens its window)"
-log_ok "and to reach a server through your own ISF: isf_ssh me@host   (see plugins/ztr_isf/README.md)"
+log_ok "and to reach a server through your own ISF: isf_ssh me@host   (ztr_isf_client sets one up; see plugins/ztr_isf/README.md)"

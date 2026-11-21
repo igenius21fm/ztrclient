@@ -17,7 +17,7 @@ of your ZTRelay dashboard. This folder is the client side.
 2. Create this machine's keypair and register the ISF:
 
    ```
-   python3 plugins/ztr_isf/ztr_isf_client.py gen-keys
+   ztr_isf_client gen-keys
    ```
 
    Paste the printed `client_public.pem` into the server installer when it
@@ -25,7 +25,7 @@ of your ZTRelay dashboard. This folder is the client side.
    `--peer-pub`).
 
    ```
-   python3 plugins/ztr_isf/ztr_isf_client.py isf add work \
+   ztr_isf_client isf add work \
        --host <your ISF's public IP> --route routes/route.ztr \
        --isf-pub <path to isf_public.pem>
    ```
@@ -33,7 +33,7 @@ of your ZTRelay dashboard. This folder is the client side.
 3. Check it:
 
    ```
-   python3 plugins/ztr_isf/ztr_isf_client.py ctrl --isf work health
+   ztr_isf_client ctrl --isf work health
    ```
 
 Several ISFs are fine; each keeps its own route. `isf list` shows them and
@@ -41,7 +41,7 @@ Several ISFs are fine; each keeps its own route. `isf list` shows them and
 
 ## What you can do
 
-`isf_ssh` is on your `PATH` once the installer has run. The other commands below are run from the client folder as `python3 plugins/ztr_isf/<name>`.
+`isf_ssh` and `ztr_isf_client` are on your `PATH` once the installer has run. The dashboard is run from the client folder as `python3 plugins/ztr_isf/ztr_isf_dashboard.py`. Below, `ztr_isf_client.py` and `ztr_isf_client` are the same program.
 
 | | |
 |---|---|

@@ -68,7 +68,7 @@ With no flags, it walks you through everything interactively (see
 [Installer prompts](#installer-prompts) below) — no flags are required for a
 normal install. Under the hood, it:
 
-1. Makes the wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry`, `ztr_proxy`, `ztr_fleet`, `isf_ssh`) executable — a zip download
+1. Makes the wrappers (`ztr_ssh`, `ztr_forward`, `ztr_pg`, `ztr_ferry`, `ztr_proxy`, `ztr_fleet`, `isf_ssh`, `ztr_isf_client`) executable — a zip download
    or fresh `git clone` doesn't reliably preserve the executable bit.
 2. Creates a dedicated venv (default `~/.local/share/ztr/ztr_venv`) and installs
    `pycryptodome` into it, isolated from your system Python.
