@@ -50,6 +50,25 @@ import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
+
+
+def _use_installer_venv():
+    """Run under the ZTRelay installer's Python when this one can't import pycryptodome, so `isf_ssh` works from any shell."""
+    try:
+        import Crypto  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if os.environ.get("ISF_SSH_REEXEC"):
+        return
+    venv = os.environ.get("ZTR_VENV_DIR") or os.path.join(os.path.expanduser("~"), ".local", "share", "ztr", "ztr_venv")
+    py = os.path.join(venv, "bin", "python3")
+    if os.path.isfile(py):
+        os.environ["ISF_SSH_REEXEC"] = "1"
+        os.execv(py, [py, os.path.realpath(__file__)] + sys.argv[1:])
+
+
+_use_installer_venv()
 CLIENT = os.path.join(HERE, "ztr_isf_client.py")
 
 VALUE_OPTS = {"--isf": "isf", "--isf-host": "isf_host", "--route": "route", "--config-file": "route",

@@ -30,7 +30,7 @@
 # automatically and just take the flags/defaults given.
 #
 # What it actually does:
-#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy,ztr_fleet/ztr_fleet} executable — a zip
+#   1. Makes plugins/{ztr_ssh,ztr_forward,ztr_pg,ztr_ferry,ztr_proxy/ztr_proxy,ztr_fleet/ztr_fleet,ztr_isf/isf_ssh} executable — a zip
 #      download doesn't reliably preserve the executable bit, so this
 #      isn't just belt-and-suspenders.
 #   2. Checks that python3 exists, then creates a dedicated venv for ztr
@@ -45,7 +45,7 @@
 #      live traffic panel. With --with-requests, also installs Pillow —
 #      ztr_requests/server.py needs it to sniff/decode image responses.
 #   3. Symlinks the wrappers into --prefix (default ~/.local/bin), so
-#      `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy`/`ztr_fleet` work from any shell, not just
+#      `ztr_ssh`/`ztr_forward`/`ztr_pg`/`ztr_ferry`/`ztr_proxy`/`ztr_fleet`/`isf_ssh` work from any shell, not just
 #      one with a hand-edited rc file. Re-running just refreshes the links.
 #   4. With --with-local-ip: creates ztr_i0, a real dummy interface (`ip
 #      link add ztr_i0 type dummy`), and binds --local-ip (default
@@ -87,14 +87,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGINS_DIR="$SCRIPT_DIR/plugins"
-WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy ztr_fleet)
+WRAPPERS=(ztr_ssh ztr_forward ztr_pg ztr_ferry ztr_proxy ztr_fleet isf_ssh)
 
 # Where a wrapper's launcher script lives. Most sit directly in plugins/;
-# ZTR Proxy and ZTR Fleet keep all of their files in their own folders.
+# ZTR Proxy, ZTR Fleet and the ISF client keep all of their files in their own folders.
 wrapper_path() {
   case "$1" in
     ztr_proxy) echo "$PLUGINS_DIR/ztr_proxy/ztr_proxy" ;;
     ztr_fleet) echo "$PLUGINS_DIR/ztr_fleet/ztr_fleet" ;;
+    isf_ssh) echo "$PLUGINS_DIR/ztr_isf/isf_ssh" ;;
     *) echo "$PLUGINS_DIR/$1" ;;
   esac
 }
@@ -909,3 +910,4 @@ if [[ "$WITH_PROXY" -eq 1 ]]; then
   log_ok "and for the browser proxy: ztr_proxy   (or find ZTR Proxy in your applications menu)"
 fi
 log_ok "and to run commands on several servers at once: ztr_fleet   (ztr_fleet --gui opens its window)"
+log_ok "and to reach a server through your own ISF: isf_ssh me@host   (see plugins/ztr_isf/README.md)"

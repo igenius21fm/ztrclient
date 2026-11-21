@@ -41,12 +41,14 @@ Several ISFs are fine; each keeps its own route. `isf list` shows them and
 
 ## What you can do
 
+`isf_ssh` is on your `PATH` once the installer has run. The other commands below are run from the client folder as `python3 plugins/ztr_isf/<name>`.
+
 | | |
 |---|---|
 | `ztr_isf_client.py connect --isf work --destination host:port --listen 127.0.0.1:2222` | a local TCP port that reaches `host:port` through your ISF |
 | `ztr_isf_client.py udp --isf work --destination 8.8.8.8:53 --listen 127.0.0.1:5353` | the same for UDP (DNS, QUIC, WireGuard…); the ISF must have UDP on, which the installer does by default |
 | `ztr_isf_client.py ctrl alias-add example.com` | a name that only your ISF understands: `<64 characters>.isf` stands for `example.com` |
-| `isf_ssh me@example.com` | ssh (and `--scp`, `--sftp`, `--copy-id`) through your ISF in one command |
+| `isf_ssh me@example.com` | ssh (and `--scp`, `--sftp`, `--copy-id`) through your ISF in one command; the installer puts it on your `PATH` |
 | `ztr_isf_dashboard.py` | a local web page (default port 8096) to manage your ISFs: sessions, allowlist, aliases |
 
 `ztr_ssh`, `ztr_forward`, ZTR Fleet, Ferry, ZTR Requests and ZTR Proxy also

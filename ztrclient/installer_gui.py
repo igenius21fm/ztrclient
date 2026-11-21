@@ -2118,7 +2118,7 @@ def build_app():
             cb.columnconfigure(0, weight=0)
             cb.columnconfigure(1, weight=1)
             ttk.Label(cb, text="Your commands", style="H.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-            rows = [("ztr_ssh", "open an ssh session through a route"), ("ztr_forward", "forward a local port to a service"), ("ztr_pg", "reach a PostgreSQL server")]
+            rows = [("ztr_ssh", "open an ssh session through a route"), ("ztr_forward", "forward a local port to a service"), ("ztr_pg", "reach a PostgreSQL server"), ("isf_ssh", "ssh through your own ISF")]
             if sel.get("ferry"):
                 rows.append(("ztr_ferry", "the file manager"))
             if sel.get("proxy"):
@@ -2178,7 +2178,7 @@ say("venv created.")
 say("installing pycryptodome into the venv ...", 1.2)
 say("pycryptodome installed.")
 say("installing wrappers into ~/.local/bin ...", 0.6)
-for n in ("ztr_ssh", "ztr_forward", "ztr_pg", "ztr_ferry", "ztr_proxy"):
+for n in ("ztr_ssh", "ztr_forward", "ztr_pg", "ztr_ferry", "ztr_proxy", "isf_ssh"):
     say(n + " -> ~/.local/bin/" + n, 0.2)
 say("declined — add this to your shell rc file yourself if you want it:", 0.1)
 print('    export PATH="$HOME/.local/bin:$PATH"  # added by ztrclient installer', flush=True)
