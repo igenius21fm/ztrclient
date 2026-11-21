@@ -788,6 +788,7 @@ select.body-search-mode {
 }
 .route-node-endpoint rect { stroke: var(--accent); }
 .route-node-warn rect { stroke: var(--warn); }
+.route-node-isf rect { stroke: var(--accent); stroke-width: 2; }
 .route-node-icon {
   fill: none;
   stroke: var(--muted);
@@ -797,6 +798,7 @@ select.body-search-mode {
 }
 .route-node-endpoint .route-node-icon { stroke: var(--accent); }
 .route-node-warn .route-node-icon { stroke: var(--warn); }
+.route-node-isf .route-node-icon { stroke: var(--accent); }
 .route-node-title {
   fill: var(--text);
   font-size: 11px;

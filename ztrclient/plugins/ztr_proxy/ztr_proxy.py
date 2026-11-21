@@ -469,15 +469,28 @@ def _merge_duplicates(items):
     return {names[low]: value for low, value in merged.items()}
 
 
+# An ISF connection can fail for the same passing reasons a plain tunnel can (a hop closing without a word on the way to
+# the ISF); those are worth another try. A destination the ISF refuses ("not permitted by allowlist") is not.
+ISF_TRANSIENT_ERRORS = ("couldn't reach the ISF", "couldn't authorize the tunnel", "closed the connection", "connection dropped")
+
+
+def _isf_transient(msg):
+    return msg.startswith("via ISF") and any(t in msg for t in ISF_TRANSIENT_ERRORS)
+
+
 class ProxySession(ztr_https.Session):
-    """A Session that acts as a proxy hop for other people's traffic rather than as a client of its own."""
+    """A Session that acts as a proxy hop for other people's traffic rather than as a client of its own.
+
+    With isf= every tunnel ends at one of your own ISFs instead of at the exit hop's own connection to the site (see
+    ztr_https). Ready tunnels (the warm pool and pinned hosts) are switched off then: an ISF dials the site the moment
+    a session opens, so a ready tunnel would be a real, idle connection to a site nobody has asked for yet."""
 
     def __init__(self, *args, warm_pool=True, warm_max_age=WARM_MAX_AGE, **kwargs):
         super().__init__(*args, **kwargs)
         # Bodies are relayed as the target sent them, still gzip/deflate-encoded if they were, so Content-Encoding and
         # Content-Length stay true and the client does the decoding. (Applies to this process only.)
         ztr_https._decode_body_chunks = lambda raw_chunks, content_encoding: raw_chunks
-        self._warm = warm_pool
+        self._warm = warm_pool and self._isf is None
         self._warm_max_age = warm_max_age
         self._spares = {}        # (domain, port) -> (conn, client, authorized_at)
         self._uses = {}          # (domain, port) -> recent request times, for deciding which targets earn a spare
@@ -499,8 +512,8 @@ class ProxySession(ztr_https.Session):
                 return self._open_once(scheme, domain, port, fresh=fresh)
             except TunnelError as e:
                 msg = str(e)
-                transient = msg.startswith("tunnel authorization failed") and (
-                    any(t in msg for t in TRANSIENT_HOP_ERRORS) or msg.endswith(": None"))
+                transient = (msg.startswith("tunnel authorization failed") and (
+                    any(t in msg for t in TRANSIENT_HOP_ERRORS) or msg.endswith(": None"))) or _isf_transient(msg)
                 if not transient or attempt == OPEN_ATTEMPTS:
                     raise
                 TELEMETRY.note("retries")
@@ -606,7 +619,10 @@ class ProxySession(ztr_https.Session):
 
     def pin(self, domain, port=443):
         """Keeps a ready tunnel for this target at all times (renewed before it ages out), so the first connection
-        to it is instant. Costs the route's hops one authorization about every PIN_RENEW seconds per pinned target."""
+        to it is instant. Costs the route's hops one authorization about every PIN_RENEW seconds per pinned target.
+        Not available through an ISF (see the class docstring)."""
+        if self._isf is not None:
+            return
         with self._spare_lock:
             self._pinned.add((domain, int(port)))
             start = self._keeper is None and not self._closing
@@ -640,13 +656,21 @@ class ProxySession(ztr_https.Session):
                     return
                 time.sleep(0.1)
 
+    @property
+    def isf_name(self):
+        """The ISF this session sends everything through, or None for a plain route."""
+        i = self._isf
+        if i is None:
+            return None
+        return i if isinstance(i, str) else (getattr(i, "name", None) or "default")
+
     def status(self):
         """For a window: how many ready tunnels exist, which targets, and how old each is."""
         now = time.time()
         with self._spare_lock:
             return {"spares": [{"host": k[0], "port": k[1], "age": now - v[2]} for k, v in self._spares.items()],
                     "refilling": sorted(self._refilling), "pinned": sorted(self._pinned), "warm": self._warm,
-                    "max_age": self._warm_max_age}
+                    "max_age": self._warm_max_age, "isf": self.isf_name}
 
     def close(self):
         with self._spare_lock:
@@ -1195,8 +1219,9 @@ class ProxyService:
 
     def __init__(self, config_file, host=None, port=DEFAULT_PORT, warm_pool=True, warm_max_age=WARM_MAX_AGE,
                  warm_min_uses=WARM_MIN_USES, timing_defense=False, pinned=(), telemetry=None, session_factory=None,
-                 idle_timeout=0, upgrade_http=True):
+                 idle_timeout=0, upgrade_http=True, isf=None):
         self.config_file, self.host_arg, self.port = config_file, host, int(port)
+        self.isf = isf or None  # the name of one of your ISFs (see ztr_https.list_isfs), or None for a plain route
         self.idle_timeout = idle_timeout  # seconds without traffic before a connection is closed; 0 = never. May be changed while running.
         self.upgrade_http = bool(upgrade_http)  # redirect plain http:// to https://; may be changed while running
         self.warm_pool, self.warm_max_age, self.warm_min_uses = warm_pool, warm_max_age, warm_min_uses
@@ -1224,8 +1249,11 @@ class ProxyService:
         globals()["WARM_MIN_USES"] = self.warm_min_uses
         GUARD.ensure_loaded()
         host = resolve_host(self.host_arg)
-        session = self.session_factory(config_file=self.config_file, with_timing_defense=self.timing_defense,
-                                       warm_pool=self.warm_pool, warm_max_age=self.warm_max_age)
+        session_kwargs = dict(config_file=self.config_file, with_timing_defense=self.timing_defense,
+                              warm_pool=self.warm_pool, warm_max_age=self.warm_max_age)
+        if self.isf:
+            session_kwargs["isf"] = self.isf  # only passed when used, so a custom session_factory without isf= keeps working
+        session = self.session_factory(**session_kwargs)
         try:
             httpd = ProxyServer((host, self.port), ProxyHandler)
         except OSError:
@@ -1235,6 +1263,8 @@ class ProxyService:
         httpd.upgrade_http = self.upgrade_http
         self.session, self.httpd, self.host = session, httpd, host
         self._stop.clear()
+        if self.isf and self.initial_pins:
+            _log("ready tunnels for pinned hosts aren't used through an ISF", "warn")
         for domain, port in self.initial_pins:
             session.pin(domain, port)
         self.telemetry.reset()
@@ -1243,7 +1273,7 @@ class ProxyService:
         self._threads = [serve, sampler]
         for t in self._threads:
             t.start()
-        _log(f"listening on {host}:{self.port}")
+        _log(f"listening on {host}:{self.port}" + (f", every connection through your ISF {self.isf!r}" if self.isf else ""))
         return host, self.port
 
     def _sample(self):
@@ -1274,7 +1304,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default=None, help=f"this proxy's own bind address (default: {DEFAULT_HOST_CANDIDATE} if this machine has that address, else {FALLBACK_HOST} — both are local-machine-only, since the proxy can carry your route's real credentials)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"this proxy's own port, for both HTTP-proxy and SOCKS5 (default: {DEFAULT_PORT})")
-    parser.add_argument("--config-file", required=True, help="a .ztr file in routes/ — every request goes through this route's tunnel")
+    parser.add_argument("--config-file", default=None, help="a .ztr file in routes/ — every request goes through this route's tunnel (with --isf: optional, overrides the ISF's own route)")
+    parser.add_argument("--isf", nargs="?", const="@default", default=None, metavar="NAME", help="send every connection through one of your own ISFs instead of letting the exit hop connect to the site (NAME from --list-isfs; just --isf means your default one). The ISF must allow the sites you visit. Ready tunnels are off in this mode")
+    parser.add_argument("--list-isfs", action="store_true", help="list the ISFs set up on this machine and exit")
     parser.add_argument("--with-timing-defense", action="store_true", help="enable the hops' own jitter/decoy traffic for every tunnel this proxy opens")
     parser.add_argument("--no-warm-pool", action="store_true", help="don't keep a ready tunnel per target (by default one is authorized in the background after each connection, so the next one to the same host starts instantly)")
     parser.add_argument("--warm-max-age", type=float, default=WARM_MAX_AGE, help=f"seconds a ready tunnel may wait unused before it's discarded (default: {WARM_MAX_AGE})")
@@ -1282,6 +1314,20 @@ def main():
     parser.add_argument("--idle-timeout", type=int, default=0, metavar="SECONDS", help=f"close a connection that has sent nothing, either way, for this many seconds — Firefox keeps connections open after you close a page, and each one holds a tunnel through your route until it is closed (0 = never, the default; otherwise at least {MIN_IDLE_TIMEOUT}). A closed connection is simply opened again when needed; anything that sits quiet on purpose (an ssh session, a chat page) would be cut too, so leave it off for those")
     parser.add_argument("--keep-ready", action="append", default=[], metavar="HOST[:PORT]", help="keep a ready tunnel to this host at all times (repeatable; port defaults to 443)")
     args = parser.parse_args()
+    if args.list_isfs:
+        isfs = ztr_https.list_isfs()
+        for i in isfs:
+            print(f"{'*' if i['default'] else ' '} {i['name']:<14} {i['host']:<16} route {i['route']:<18}" + ("" if i["key_installed"] else "  (ISF public key missing)"))
+        print("(* = default)" if isfs else "no ISFs set up — add one with isf_ssh --save or the ISF dashboard")
+        return
+    if not args.config_file and args.isf is None:
+        parser.error("--config-file or --isf is required")
+    try:
+        isf = ztr_https.check_isf(args.isf)
+    except ValueError as e:
+        parser.error(str(e))
+    if isf and args.keep_ready:
+        _log("--keep-ready is ignored through an ISF", "warn")
     if args.idle_timeout and args.idle_timeout < MIN_IDLE_TIMEOUT:
         parser.error(f"--idle-timeout must be 0 (never) or at least {MIN_IDLE_TIMEOUT} seconds")
     pins = []
@@ -1294,10 +1340,10 @@ def main():
 
     service = ProxyService(args.config_file, host=host, port=args.port, warm_pool=not args.no_warm_pool,
                            warm_max_age=args.warm_max_age, warm_min_uses=args.warm_min_uses,
-                           timing_defense=args.with_timing_defense, pinned=pins, idle_timeout=args.idle_timeout)
+                           timing_defense=args.with_timing_defense, pinned=pins, idle_timeout=args.idle_timeout, isf=isf)
     service.start()
     print(f"ztr_proxy listening on {service.host}:{service.port} — HTTP proxy: -x http://{service.host}:{service.port}   "
-          f"SOCKS5: --socks5-hostname {service.host}:{service.port}")
+          f"SOCKS5: --socks5-hostname {service.host}:{service.port}" + (f"   via ISF {isf!r}" if isf else ""))
     try:
         while True:
             time.sleep(3600)

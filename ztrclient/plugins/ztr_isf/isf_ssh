@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+isf_ssh — ssh (and scp / sftp / ssh-copy-id) through your ISF over ZTRelay, in one command.
+
+    isf_ssh me@example.com                       # a normal ssh session, via ZTRelay and your ISF
+    isf_ssh me@example.com -p 2222 -i ~/.ssh/key 'uptime'
+    isf_ssh --route US_c6c0ed68 me@example.com   # use this route for this run
+    isf_ssh --isf work me@example.com            # use your ISF called "work"
+    isf_ssh --scp ./file.txt me@example.com:/tmp/
+    isf_ssh --sftp me@example.com
+    isf_ssh --copy-id -i ~/.ssh/id_ed25519.pub me@example.com
+
+Every connection goes: this machine -> ZTRelay (entry, middle, exit) -> your ISF -> the server, and says
+so on stderr before ssh starts (--no-log hides that). The addresses of the ZTRelay hops and of your ISF
+are masked there (138.197.x.x); --show-ips reveals them. The exit only learns the ISF's address; the server
+sees the ISF's IP. Each run asks the ISF for a fresh single-use session and ends it when ssh exits.
+
+CHOOSING A ROUTE AND AN ISF
+    isf_ssh --routes                   list your routes (file, exit country, status, entry and exit address)
+    isf_ssh --isfs                     list your ISFs; * marks the default
+    isf_ssh --route NAME ...           use this route for one run (a file in routes/, or just its id: c6c0ed68)
+    isf_ssh --isf NAME ...             use one of your ISFs for one run
+  Both are remembered per ISF: a route is part of an ISF's settings, so each ISF can use its own route.
+
+SETTING UP AN ISF (once; several are fine)
+    isf_ssh --save --isf NAME --isf-host IP --route FILE [--isf-pub PATH_TO_ITS_PUBLIC_KEY]
+  Creates or updates the ISF called NAME ("default" if you leave --isf out); the first one becomes the default.
+  The same list is managed in the dashboard (ztr_isf_dashboard.py) and with `ztr_isf_client.py isf ...`.
+
+OTHER OPTIONS
+  --ctrl-port N, --data-port N, --keys-dir DIR, --ztrclient-dir DIR, --ttl SECONDS, --timing-defense
+  --rh HOST / --rp N        ztr_ssh-style spelling of the host and port (ssh only)
+  --scp | --sftp | --copy-id    run that tool instead of ssh
+  --no-log                  don't print the "via ZTRelay and your ISF" lines
+  --show-ips                show the real addresses of the hops and the ISF in those lines (masked by default)
+  --print-proxy-command     print the ProxyCommand string (to use with other tools) and exit
+  --dry-run                 print the command that would run and exit
+Everything else goes straight to ssh / scp / sftp.
+
+How it works: ssh is started with a ProxyCommand that runs `ztr_isf_client.py proxy`, which creates the
+session, opens the encrypted data tunnel and bridges it to ssh's stdin/stdout. ssh sees the real host
+name, so host-key checking, ~/.ssh/config, ControlMaster, agent forwarding and every other ssh option
+behave as usual — no local ports, no known_hosts clutter.
+"""
+import argparse
+import os
+import shlex
+import shutil
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+CLIENT = os.path.join(HERE, "ztr_isf_client.py")
+
+VALUE_OPTS = {"--isf": "isf", "--isf-host": "isf_host", "--route": "route", "--config-file": "route",
+              "--ctrl-port": "ctrl_port", "--data-port": "data_port", "--keys-dir": "keys_dir", "--isf-pub": "isf_pub",
+              "--ztrclient-dir": "ztrclient_dir", "--ttl": "ttl", "--rh": "rh", "--rp": "rp", "--python": "python"}
+FLAG_OPTS = {"--timing-defense": "timing_defense", "--save": "save", "--scp": "scp", "--sftp": "sftp", "--copy-id": "copy_id",
+             "--print-proxy-command": "print_proxy", "--dry-run": "dry_run", "--no-log": "no_log", "--show-ips": "show_ips",
+             "--routes": "routes", "--isfs": "isfs", "-h": "help", "--help": "help"}
+
+
+class UsageError(Exception):
+    pass
+
+
+def parse(argv):
+    """Splits our own options from the arguments that belong to ssh / scp / sftp."""
+    opts, rest = {}, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        name, eq, val = a.partition("=")
+        if name in VALUE_OPTS:
+            if not eq:
+                i += 1
+                if i >= len(argv):
+                    raise UsageError(f"{name} needs a value")
+                val = argv[i]
+            opts[VALUE_OPTS[name]] = val
+        elif a in FLAG_OPTS:
+            opts[FLAG_OPTS[a]] = True
+        else:
+            rest.append(a)
+        i += 1
+    return opts, rest
+
+
+def _client():
+    try:
+        import ztr_isf_client as C
+    except ImportError as e:
+        raise UsageError(f"missing a Python package ({e.name or e}) — install pycryptodome (pip install pycryptodome)") from None
+    return C
+
+
+def _number(opts, key):
+    if key in opts:
+        try:
+            opts[key] = int(opts[key])
+        except (TypeError, ValueError):
+            raise UsageError(f"--{key.replace('_', '-')} must be a number") from None
+
+
+def proxy_command(opts, zdir=None):
+    """The ProxyCommand string. The ISF's own settings (address, route, ports) are read by the proxy from the
+    chosen ISF at run time; only what was given on the command line is passed along."""
+    py = opts.get("python") or sys.executable or "python3"
+    parts = [py, CLIENT, "proxy", "--destination", "%h:%p", "--ttl", str(opts.get("ttl", 60))]
+    for flag, key in (("--isf", "isf"), ("--isf-host", "isf_host"), ("--config-file", "route"), ("--ctrl-port", "ctrl_port"),
+                      ("--data-port", "data_port"), ("--keys-dir", "keys_dir"), ("--isf-pub", "isf_pub")):
+        if opts.get(key) not in (None, ""):
+            parts += [flag, str(opts[key])]
+    z = opts.get("ztrclient_dir") or zdir
+    if z:
+        parts += ["--ztrclient-dir", z]
+    if opts.get("timing_defense"):
+        parts.append("--timing-defense")
+    if opts.get("no_log"):
+        parts.append("--quiet")
+    if opts.get("show_ips"):
+        parts.append("--show-ips")
+    # ssh expands %h and %p itself; everything else is quoted for the shell it runs this through.
+    return " ".join(p if p == "%h:%p" else shlex.quote(p) for p in parts)
+
+
+def check_setup(C, opts, zdir):
+    """Fails early, with a useful message, when there is no ISF to use; resolves --route to a real file."""
+    _number(opts, "ctrl_port"); _number(opts, "data_port"); _number(opts, "ttl")
+    if opts.get("route"):
+        opts["route"] = C.resolve_route(zdir, opts["route"])
+    if not opts.get("isf_host"):
+        ps = C.Profiles()
+        try:
+            ps.get(opts.get("isf"))
+        except C.IsfError as e:
+            raise UsageError(f"{e}\n  set one up with: isf_ssh --save --isf NAME --isf-host IP --route FILE   (list routes: isf_ssh --routes)") from None
+    elif not (opts.get("route")):
+        raise UsageError("--isf-host needs --route too (see: isf_ssh --routes)")
+
+
+def build_command(argv, zdir=None):
+    opts, rest = parse(argv)
+    C = _client()
+    zdir = zdir or C.locate_ztrclient(opts.get("ztrclient_dir"))
+    check_setup(C, opts, zdir)
+    prog = "scp" if opts.get("scp") else "sftp" if opts.get("sftp") else "ssh-copy-id" if opts.get("copy_id") else "ssh"
+    cmd = [prog, "-o", f"ProxyCommand={proxy_command(opts, zdir)}"]
+    if opts.get("rp"):
+        cmd += [{"ssh": "-p", "ssh-copy-id": "-p", "scp": "-P", "sftp": "-P"}[prog], str(opts["rp"])]
+    if opts.get("rh"):
+        if prog in ("scp", "sftp"):
+            raise UsageError("--rh is for ssh; for scp/sftp write user@host:path as usual")
+        cmd.append(opts["rh"])
+    return cmd + rest, opts
+
+
+def save_isf(opts):
+    C = _client()
+    zdir = C.locate_ztrclient(opts.get("ztrclient_dir"))
+    ps = C.Profiles()
+    name = opts.get("isf") or "default"
+    if opts.get("route"):
+        opts["route"] = C.resolve_route(zdir, opts["route"])
+    _number(opts, "ctrl_port"); _number(opts, "data_port")
+    try:
+        p = ps.upsert(name, host=opts.get("isf_host"), route=opts.get("route"), ctrl_port=opts.get("ctrl_port"),
+                      data_port=opts.get("data_port"), isf_pub=opts.get("isf_pub"),
+                      timing_defense=True if opts.get("timing_defense") else None)
+    except C.IsfError as e:
+        raise UsageError(str(e)) from None
+    if opts.get("ztrclient_dir"):
+        ps.data["ztrclient_dir"] = opts["ztrclient_dir"]
+    ps.save()
+    msg = f"saved ISF {name!r}: {p['host']} via route {p['route']} (default: {ps.default_name})"
+    if not os.path.exists(p["isf_pub"]):
+        msg += f"\nnote: put the ISF's public key (its isf_public.pem) at {p['isf_pub']}"
+    return msg
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        opts0, _ = parse(argv)
+        if opts0.get("help") or not argv:
+            print(__doc__.strip())
+            return 0
+        if opts0.get("routes") or opts0.get("isfs"):
+            C = _client()
+            zdir = C.locate_ztrclient(opts0.get("ztrclient_dir"))
+            if opts0.get("routes"):
+                C._print_routes(zdir)
+            if opts0.get("isfs"):
+                C._isf_command(argparse.Namespace(isf_cmd="list"), zdir)
+            return 0
+        if opts0.get("save"):
+            print(save_isf(opts0))
+            return 0
+        cmd, o = build_command(argv)
+        if o.get("print_proxy"):
+            print(cmd[2][len("ProxyCommand="):])
+            return 0
+        if o.get("dry_run"):
+            print(" ".join(shlex.quote(c) for c in cmd))
+            return 0
+        if not shutil.which(cmd[0]):
+            raise UsageError(f"{cmd[0]} is not installed on this machine")
+        os.execvp(cmd[0], cmd)
+    except UsageError as e:
+        print(f"isf_ssh: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="dash-token" content="{{TOKEN}}">
+<title>ISF dashboard</title>
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>ISF Dashboard</h1>
+    <span class="sub">your forwarders &middot; reached through ZTRelay</span>
+    <div class="right">
+      <span id="status" class="pill checking">CHECKING</span>
+    </div>
+  </header>
+
+  <nav class="isfbar">
+    <div id="isf-tabs" class="tabs"></div>
+    <button class="btn" id="add-isf-btn" type="button">+ Add ISF</button>
+    <button class="btn" id="manage-btn" type="button">Manage ISFs</button>
+  </nav>
+
+  <div class="toolbar">
+    <button class="btn" id="refresh-btn">Refresh now</button>
+    <button class="btn" id="addr-toggle" type="button" title="Hide or show the addresses of the hops and the ISF">Addresses hidden</button>
+    <span id="updated" class="muted"></span>
+    <span id="stale" class="warn hidden"></span>
+  </div>
+
+  <main class="wrap">
+    <section id="manage" class="panel hidden">
+      <h2>Your ISFs</h2>
+      <div id="isf-empty" class="pad muted hidden">No ISF yet. Add one below: its address, the route to reach it through, and its public key.</div>
+      <table id="isf-table" class="tbl hidden">
+        <thead><tr><th></th><th>Name</th><th>Address</th><th>Route</th><th>Status</th><th>Key</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <form id="isf-form" class="isfform" autocomplete="off">
+        <h3 id="isf-form-title">Add an ISF</h3>
+        <div class="formgrid">
+          <label>Name <input id="i-name" maxlength="32" placeholder="e.g. home, work" required></label>
+          <label>ISF address <input id="i-host" placeholder="public IPv4 of the ISF" required></label>
+          <label>Route <select id="i-route"></select></label>
+          <label>Control port <input id="i-ctrl" type="number" min="1" max="65535" value="7700"></label>
+          <label>Data port <input id="i-data" type="number" min="1" max="65535" value="7781"></label>
+          <label>UDP port <input id="i-udp" type="number" min="1" max="65535" value="7782"></label>
+          <label>Note <input id="i-note" maxlength="120" placeholder="optional"></label>
+        </div>
+        <label class="wide">The ISF's public key <span class="muted">(its isf_public.pem — paste the whole PEM)</span>
+          <textarea id="i-pem" rows="4" placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
+        </label>
+        <div class="checks">
+          <label class="check hidden" id="i-replace-wrap"><input id="i-replace" type="checkbox"> replace the key already installed</label>
+          <label class="check"><input id="i-timing" type="checkbox"> timing defense (jitter + decoy traffic)</label>
+          <label class="check"><input id="i-default" type="checkbox"> make this the default ISF</label>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="i-save" type="submit">Save ISF</button>
+          <button class="btn" id="i-cancel" type="button">Cancel</button>
+        </div>
+        <div id="isf-error" class="err hidden"></div>
+      </form>
+
+      <div class="yourkey">
+        <h3>Your public key</h3>
+        <div class="muted">Give this to each ISF's operator (as <span class="mono">--peer-pub</span>). It is safe to share; the private key never leaves this machine.</div>
+        <div class="muted">Fingerprint <span id="key-fp" class="mono">&mdash;</span></div>
+        <textarea id="key-pem" readonly rows="4"></textarea>
+        <button class="btn" id="copy-key" type="button">Copy public key</button>
+      </div>
+    </section>
+
+    <div id="no-isf" class="panel pad hidden">Add an ISF to get started.</div>
+
+    <div id="isf-view">
+      <section class="cards">
+        <div class="mcard"><div class="label">Control round trip</div><div class="value" id="m-rtt">&mdash;</div></div>
+        <div class="mcard"><div class="label">ISF uptime</div><div class="value" id="m-uptime">&mdash;</div></div>
+        <div class="mcard"><div class="label">Live sessions</div><div class="value" id="m-live">&mdash;</div><div class="hint" id="m-live-hint"></div></div>
+        <div class="mcard"><div class="label">Clock difference</div><div class="value" id="m-skew">&mdash;</div><div class="hint" id="m-skew-hint"></div></div>
+      </section>
+
+      <section class="panel netpanel">
+        <h2>Network path</h2>
+        <div id="net" class="net"></div>
+        <div id="net-foot" class="netfoot"></div>
+      </section>
+
+      <section class="panel sesspanel">
+        <h2>Your sessions</h2>
+        <div class="sesstools" id="sess-tools">
+          <div class="seg" id="sess-filter" role="group" aria-label="Show">
+            <button type="button" class="segbtn" data-f="open">Open <b id="sf-open">0</b></button>
+            <button type="button" class="segbtn" data-f="closed">Closed <b id="sf-closed">0</b></button>
+            <button type="button" class="segbtn" data-f="all">All <b id="sf-all">0</b></button>
+          </div>
+          <input id="sess-q" type="search" placeholder="Search sessions" aria-label="Search sessions">
+          <span id="sess-summary" class="muted"></span>
+        </div>
+        <div id="sessions-empty" class="muted pad">No sessions yet.</div>
+        <div class="scroll tall" id="sess-scroll">
+          <table id="sessions" class="tbl sess hidden">
+            <thead><tr><th>State</th><th>Destination</th><th>Label</th><th>Time</th><th class="num">Up</th><th class="num">Down</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="sess-more" class="muted pad hidden"></div>
+      </section>
+
+      <div class="flow">
+        <section class="panel">
+              <h2>New session</h2>
+              <form id="create-form" class="form" autocomplete="off">
+                <label>Destination <input id="f-dest" placeholder="host:port, e.g. 10.0.0.5:22" required></label>
+                <label>Protocol <select id="f-proto"><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+                <label>Ticket valid for (s) <input id="f-ttl" type="number" min="1" value="300"></label>
+                <label>Label <input id="f-label" maxlength="64" placeholder="optional"></label>
+                <button class="btn primary" id="create-btn" type="submit">Create session</button>
+              </form>
+              <div id="create-error" class="err hidden"></div>
+              <div id="allow-it-wrap" class="padx hidden"><button class="btn primary" id="allow-it" type="button"></button></div>
+              <div id="ticket-box" class="ticket hidden">
+                <div class="muted" id="ticket-lead">Ticket (shown once &mdash; it holds the session key; treat it like a password)</div>
+                <textarea id="ticket" readonly rows="2"></textarea>
+                <div class="muted" id="command-lead">Open it on this machine:</div>
+                <textarea id="command" readonly rows="4"></textarea>
+                <div class="row"><button class="btn" id="copy-ticket" type="button">Copy ticket</button><button class="btn" id="copy-command" type="button">Copy command</button><button class="btn" id="hide-ticket" type="button">Hide</button></div>
+              </div>
+            </section>
+        <section class="panel">
+              <h2>Allowlist</h2>
+              <div id="allow-note" class="pad muted"></div>
+              <div class="scroll short">
+                <table id="allow-table" class="tbl hidden">
+                  <thead><tr><th>Destination</th><th>From</th><th></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <form id="allow-form" class="allowform" autocomplete="off">
+                <input id="allow-entry" placeholder="host:port or host:*  (e.g. mor-tra.com:22)">
+                <button class="btn primary" id="allow-add" type="submit">Allow</button>
+              </form>
+              <div id="allow-error" class="err hidden"></div>
+            </section>
+        <section class="panel" id="alias-panel">
+              <h2>Aliases <span class="muted" id="alias-count"></span></h2>
+              <div id="alias-note" class="pad muted"></div>
+              <div class="scroll short">
+                <table id="alias-table" class="tbl hidden">
+                  <thead><tr><th>Alias (only this ISF understands it)</th><th>Points at</th><th></th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <form id="alias-form" class="aliasform" autocomplete="off">
+                <input id="alias-target" class="full" placeholder="real host this alias stands for, e.g. example.com" required>
+                <div class="namerow">
+                  <input id="alias-name" placeholder="alias name — click Generate for 64 random characters" maxlength="64" spellcheck="false">
+                  <button class="btn" id="alias-generate" type="button" title="Fill in a new random 64-character name">Generate</button>
+                </div>
+                <input id="alias-note-in" placeholder="note (optional)" maxlength="120">
+                <button class="btn primary" id="alias-add" type="submit">Create alias</button>
+                <div class="muted full" id="alias-preview"></div>
+              </form>
+              <div id="alias-error" class="err hidden"></div>
+              <div id="alias-made" class="padx hidden">
+                <div class="muted">New alias &mdash; use it anywhere you would write the host: <span class="mono">isf_ssh me@&lt;alias&gt;</span>, <span class="mono">--destination &lt;alias&gt;:443</span></div>
+                <textarea id="alias-made-text" readonly rows="2"></textarea>
+                <div class="row"><button class="btn" id="alias-copy" type="button">Copy alias</button><button class="btn" id="alias-hide" type="button">Hide</button></div>
+              </div>
+            </section>
+        <section class="panel">
+              <h2>ISF</h2>
+              <dl class="kv" id="isf-details"></dl>
+            </section>
+        <section class="panel">
+              <h2>Policy &amp; limits</h2>
+              <dl class="kv" id="policy-details"></dl>
+            </section>
+        <section class="panel">
+              <h2>Route</h2>
+              <div id="route" class="pad muted">&mdash;</div>
+              <div class="routepick">
+                <select id="route-select"></select>
+                <button class="btn" id="route-save" type="button">Use this route</button>
+              </div>
+            </section>
+        <section class="panel">
+              <h2>Round-trip history</h2>
+              <div id="spark" class="spark"></div>
+            </section>
+        <section class="panel">
+              <h2>Events</h2>
+              <ul id="events" class="events"><li class="muted">Nothing yet.</li></ul>
+            </section>
+      </div>
+    </div>
+  </main>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

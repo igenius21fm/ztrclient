@@ -18,6 +18,13 @@ through it. Folder listings, new folders, renames and deletes, and every
 transfer, reuse that one connection — so you sign in once, not per action. The
 server only needs ssh (and a shell); nothing is installed on it.
 
+Optionally the connection can go through one of your own ISFs (Intermediate Server Forwarders — see
+ztr_isf_client.py): pick it under "Via ISF". Your machine -> ZTRelay -> your ISF -> the server, so the exit hop
+only ever sees the ISF and the server sees the ISF's address. The server must then be a real host name or address
+(an ISF can't look up ._ztr aliases) and the ISF must allow it. The ISFs listed are the ones set up on this
+machine (~/.ztr_isf/isfs.json, managed with isf_ssh or the ISF dashboard). The whole session — listings and
+transfers — rides one ssh connection, so it costs a single ISF connection.
+
     python3 plugins/ztr_ferry.py
 
 Needs only Python's standard library (tkinter included) plus rsync and ssh on
@@ -114,13 +121,21 @@ class ControlClient:
     def list(self, timeout=4):
         return self.call({"cmd": "list"}, timeout=timeout)
 
-    def start(self, relay_name, target_port, config_file=None):
+    def start(self, relay_name, target_port, config_file=None, isf=None):
         req = {"cmd": "start", "relay_name": relay_name, "target_port": int(target_port)}
         if config_file:
             req["config_file"] = config_file
+        if isf:
+            req["isf"] = isf
         res = self.call(req)
         if not res.get("status"):
             raise ControlError(res.get("error") or "The tunnel service couldn't start a tunnel.")
+        if isf and not res.get("isf"):
+            # A tunnel service from before ISF support ignores the field and connects without one — never go on.
+            if res.get("session_id"):
+                self.end(res["session_id"])
+            raise ControlError("This tunnel service doesn't support ISFs (it would have connected without one). "
+                               "Update ztr_tunnel_lp.py and restart the service.")
         return res
 
     def end(self, session_id):
@@ -635,9 +650,11 @@ class Connection:
     transfers — rides that connection, so the login happens once."""
 
     def __init__(self, host, port, user, route=None, key_path=None, password=None,
-                 control=None, control_port=DEFAULT_CONTROL_PORT, ssh="ssh", rsync="rsync"):
+                 control=None, control_port=DEFAULT_CONTROL_PORT, ssh="ssh", rsync="rsync", isf=None):
         self.host, self.port, self.user = host, int(port), user
         self.route, self.key_path, self.password = route, key_path, password
+        self.isf = isf or None        # the name of one of your ISFs, or None
+        self.isf_path = []            # what the tunnel service says the connection goes through (addresses masked)
         self.control = control or ControlClient(port=control_port)
         self.ssh, self.rsync = ssh, rsync
         self.session_id = self.local_ip = self.local_port = None
@@ -653,7 +670,11 @@ class Connection:
         emit = emit or (lambda *a: None)
         self.caps = rsync_capabilities(self.rsync)
         emit("status", "Opening a tunnel…")
-        session = self.control.start(self.host, self.port, self.route)
+        if self.isf:
+            session = self.control.start(self.host, self.port, self.route, isf=self.isf)
+            self.isf_path = list(session.get("path") or [])
+        else:
+            session = self.control.start(self.host, self.port, self.route)
         self.session_id = session["session_id"]
         self.local_ip, self.local_port, self.warm = session["local_ip"], session["local_port"], bool(session.get("warm"))
         askpass = None
@@ -718,6 +739,8 @@ class Connection:
         argv += ["--rh", self.host, "--rp", str(self.port)]
         if self.route:
             argv += ["--config-file", self.route]
+        if self.isf:
+            argv += ["--isf"] if self.isf == "@default" else ["--isf", self.isf]
         argv += ["--cp", str(control_port or getattr(self.control, "port", DEFAULT_CONTROL_PORT))]
         return argv
 
@@ -1144,7 +1167,7 @@ class Connection:
 # ───────────────────────────── settings ─────────────────────────────
 
 DEFAULT_SETTINGS = {
-    "host": "", "port": "22", "user": "", "route": "", "auth": "key", "key_path": "",
+    "host": "", "port": "22", "user": "", "route": "", "isf": "", "auth": "key", "key_path": "",
     "local_dir": str(Path.home()), "policy": "skip", "bwlimit": "", "show_hidden": True, "compare": False,
     "compress": True, "streams": str(DEFAULT_STREAMS),
     "control_port": str(DEFAULT_CONTROL_PORT),
@@ -1237,7 +1260,7 @@ def load_settings():
     return data
 
 
-SITE_FIELDS = ("host", "port", "user", "route", "auth", "key_path")
+SITE_FIELDS = ("host", "port", "user", "route", "isf", "auth", "key_path")
 
 
 def load_sites():
@@ -1299,6 +1322,34 @@ def route_label(name):
     """A route's name for a list: 'US  ·  route.ztr', unless the file name already starts with the country (US_3b983776.ztr)."""
     code = route_country(name) if name else ""
     return f"{code}  ·  {name}" if code and not name.upper().startswith(code + "_") else name
+
+
+def isf_profiles_path():
+    return Path(os.environ.get("ISF_PROFILES") or Path.home() / ".ztr_isf" / "isfs.json")
+
+
+def list_isfs():
+    """The ISFs set up on this machine, for a choice: [{'name', 'route', 'default'}] — the addresses are not needed
+    here, so they are not read. [] when there are none."""
+    try:
+        data = json.loads(isf_profiles_path().read_text())
+        profiles = data["isfs"]
+        names = sorted(n for n, p in profiles.items() if isinstance(p, dict))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+    default = data.get("default") if data.get("default") in names else (names[0] if names else None)
+    return [{"name": n, "route": str(profiles[n].get("route") or ""), "default": n == default} for n in names]
+
+
+def isf_label(name):
+    """An ISF's name for a list: 'work' or 'work  ·  default'."""
+    for item in list_isfs():
+        if item["name"] == name:
+            return f"{name}  ·  default" if item["default"] else name
+    return name
+
+
+NO_ISF = "No ISF"
 
 
 def fmt_elapsed(seconds):
@@ -2492,6 +2543,7 @@ def build_app():
             slot.columnconfigure(0, weight=1)
             self.host, self.port, self.user = tk.StringVar(), tk.StringVar(), tk.StringVar()
             self.route, self.auth = tk.StringVar(), tk.StringVar(value="key")
+            self.isf = tk.StringVar()
             self.key_path, self.password, self.control_port = tk.StringVar(), tk.StringVar(), tk.StringVar()
             self.site_var = tk.StringVar()
 
@@ -2534,8 +2586,29 @@ def build_app():
             self.route_box.grid(row=1, column=0, sticky="ew", pady=(4, 0))
             self.form_inputs.append(self.route_box)
 
+            # optional: through one of your own ISFs (the exit then only sees the ISF)
+            isf_row = ttk.Frame(c, style="Card.TFrame")
+            isf_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            isf_row.columnconfigure(1, weight=1)
+            ttk.Label(isf_row, text="Via ISF  (optional)", style="Dim.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+            self.isf_text = tk.StringVar(value=NO_ISF)
+            self._isf_names = {}
+
+            def isf_values():
+                self._isf_names = {isf_label(i["name"]): i["name"] for i in list_isfs()}
+                return [NO_ISF] + list(self._isf_names)
+            self.isf_values = isf_values
+            self.isf.trace_add("write", lambda *a: self.isf_text.set(isf_label(self.isf.get()) if self.isf.get() else NO_ISF))
+            self.isf_box = Combo(isf_row, textvariable=self.isf_text, state="readonly", values=isf_values(), width=22)
+            self.isf_box.inner.bind("<<ComboboxSelected>>", lambda e: self.isf.set(self._isf_names.get(self.isf_text.get(), "")))
+            self.isf_box.inner.bind("<Button-1>", lambda e: self.isf_box.inner.configure(values=isf_values()), add="+")
+            self.isf_box.grid(row=1, column=0, sticky="w", pady=(4, 0))
+            ttk.Label(isf_row, text="A server of your own between the exit and the destination: the exit only sees it. "
+                                    "Then give the server's real host name or address.", style="Dim.TLabel").grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+            self.form_inputs.append(self.isf_box)
+
             auth_row = ttk.Frame(c, style="Card.TFrame")
-            auth_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+            auth_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
             auth_row.columnconfigure(2, weight=1)
             ttk.Label(auth_row, text="Sign in with", style="Dim.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
             for i, (text, value) in enumerate((("SSH key", "key"), ("Password", "password"))):
@@ -2567,7 +2640,7 @@ def build_app():
             self.connect_btn.grid(row=0, column=4, rowspan=2, sticky="e")
             self.connect_status = tk.StringVar()
             self.connect_status_label = ttk.Label(c, textvariable=self.connect_status, style="Dim.TLabel", justify="left")
-            self.connect_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            self.connect_status_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
             self.connect_status_label.bind("<Configure>", lambda e: self.connect_status_label.configure(wraplength=max(240, e.width - 8)))
 
             self.bar_outer, b = self._card(slot, radius=14, pad=(18, 10))
@@ -2695,10 +2768,17 @@ def build_app():
             if blank:  # a new tab starts empty; saved sites fill it in
                 self.port.set("22")
                 self.route.set("Service default")
+                self.isf.set("")
                 return
             self.host.set(st["host"]); self.port.set(st["port"]); self.user.set(st["user"])
             self.route.set(st["route"] if st["route"] in list_routes() else "Service default")
+            self.isf.set(self._known_isf(st.get("isf")))
             self.auth.set(st["auth"]); self.key_path.set(st["key_path"])
+
+        @staticmethod
+        def _known_isf(name):
+            """A saved ISF choice, or "" when that ISF has since been removed."""
+            return name if name and any(i["name"] == name for i in list_isfs()) else ""
 
         def _policy_key(self):
             return next((k for k, label in POLICIES if label == self.policy.get()), "skip")
@@ -2719,7 +2799,8 @@ def build_app():
         def _save_fields(self):
             save_settings({
                 "host": self.host.get().strip(), "port": self.port.get().strip() or "22", "user": self.user.get().strip(),
-                "route": "" if self.route.get() == "Service default" else self.route.get(), "auth": self.auth.get(),
+                "route": "" if self.route.get() == "Service default" else self.route.get(), "isf": self.isf.get(),
+                "auth": self.auth.get(),
                 "key_path": self.key_path.get().strip(), "control_port": self.control_port.get().strip() or str(DEFAULT_CONTROL_PORT),
                 "local_dir": self.local.path or str(Path.home()), "policy": self._policy_key(), "bwlimit": self.bwlimit.get().strip(),
                 "show_hidden": bool(self.show_hidden.get()), "compare": bool(self.compare.get()),
@@ -2732,6 +2813,7 @@ def build_app():
                 return
             self.host.set(site["host"]); self.port.set(site["port"] or "22"); self.user.set(site["user"])
             self.route.set(site["route"] if site["route"] in list_routes() else "Service default")
+            self.isf.set(self._known_isf(site.get("isf")))
             self.auth.set(site["auth"] or "key"); self.key_path.set(site["key_path"])
             self.password.set("")
             self._auth_changed()
@@ -2746,7 +2828,7 @@ def build_app():
                 return
             self.sites["sites"][name] = {
                 "host": host, "port": self.port.get().strip() or "22", "user": user,
-                "route": "" if self.route.get() == "Service default" else self.route.get(),
+                "route": "" if self.route.get() == "Service default" else self.route.get(), "isf": self.isf.get(),
                 "auth": self.auth.get(), "key_path": self.key_path.get().strip(),
             }
             save_sites(self.sites)
@@ -2866,8 +2948,11 @@ def build_app():
             if use_password and not self.password.get():
                 return self._connect_error("Enter the password, or switch to SSH key.")
             route = None if self.route.get() in ("", "Service default") else self.route.get()
+            isf = self.isf.get() or None
+            if isf and host.lower().endswith("._ztr"):
+                return self._connect_error("An ISF can't look up ._ztr names — enter the server's real host name or address, or pick “No ISF”.")
             conn = Connection(host, port, user, route, self.key_path.get().strip() or None,
-                              self.password.get() if use_password else None, control_port=cport, **self.conn_extra)
+                              self.password.get() if use_password else None, control_port=cport, isf=isf, **self.conn_extra)
             self._save_fields()
             self.connecting = True
             self._t_connect = time.time()
@@ -2893,7 +2978,10 @@ def build_app():
             self.retitle()
             self.form_outer.grid_remove()
             self.bar_outer.grid()
-            self.bar_text.set(f"Connected  ·  {conn.user}@{conn.host}" + (f"  ·  route {route_label(conn.route)}" if conn.route else ""))
+            self.bar_text.set(f"Connected  ·  {conn.user}@{conn.host}" + (f"  ·  route {route_label(conn.route)}" if conn.route else "")
+                              + (f"  ·  via ISF {conn.isf}" if conn.isf else ""))
+            for line in conn.isf_path:
+                self._log_line("ISF: " + line)
             self._set_status(f"Connected in {fmt_elapsed(time.time() - self._t_connect)}.", "ok")
             self._update_buttons()
             self.go(self.remote, "")

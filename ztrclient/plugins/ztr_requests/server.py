@@ -186,6 +186,15 @@ def route_entry_ports(config_file):
     return sorted(p for p in ports if isinstance(p, int)) if isinstance(ports, list) else []
 
 
+def parse_isf(raw):
+    """(isf, error). "" / None mean no ISF: the exit hop connects to the site. Anything else has to be the name of one
+    of the ISFs set up on this machine (the list isf_ssh and the ISF dashboard manage), or "@default"."""
+    try:
+        return ztr_https.check_isf(raw if isinstance(raw, str) else None), None
+    except ValueError as e:
+        return None, str(e)
+
+
 def parse_entry_port(raw, config_file):
     """(entry_port, error). None / "" / "auto" mean auto: the client picks
     the least-used lane per new connection (entry_port None). Anything else
@@ -451,6 +460,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_static(path[len("/static/"):])
         elif path == "/api/routes":
             self._send_json(200, {"routes": list_route_files()})
+        elif path == "/api/isfs":
+            # Names, masked addresses and routes only — never the ISF's real address or any key material.
+            self._send_json(200, {"isfs": ztr_https.list_isfs()})
         elif path == "/api/route_ports":
             ports = route_entry_ports(qs.get("config_file", [""])[0])
             if ports is None:
@@ -551,6 +563,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Not lane-checked: it only has to match the key a Session
                 # was stored under, and an unknown value simply matches none.
                 entry_port=body["entry_port"] if isinstance(body.get("entry_port"), int) else None,
+                # Same: it only has to match the key a Session was stored under.
+                isf=(body.get("isf") or None) if isinstance(body.get("isf"), str) else None,
             )
             self._send_json(200, {"ok": True})
         else:
@@ -688,11 +702,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             verify = True
         client_cert = (body.get("client_cert") or "").strip() or None
 
-        if not config_file or not url:
-            self._send_json(400, {"ok": False, "error": "config_file and url are required"})
+        isf, isf_error = parse_isf(body.get("isf"))
+        if isf_error:
+            self._send_json(400, {"ok": False, "error": isf_error})
+            return
+        if (not config_file and not isf) or not url:
+            self._send_json(400, {"ok": False, "error": "url is required, and config_file unless an ISF is chosen"})
             return
 
-        entry_port, entry_port_error = parse_entry_port(body.get("entry_port"), config_file)
+        # Through an ISF the entry lane is picked per connection, so a chosen one is ignored (and not checked).
+        entry_port, entry_port_error = (None, None) if isf else parse_entry_port(body.get("entry_port"), config_file)
         if entry_port_error:
             self._send_json(400, {"ok": False, "error": entry_port_error})
             return
@@ -716,6 +735,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             verify=verify,
             cert=client_cert,
             entry_port=entry_port,
+            isf=isf,
         )
         session = sessions.get_or_create(**session_kwargs)
 
@@ -754,6 +774,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "method": method,
                 "url": url,
                 "config_file": config_file,
+                "isf": isf,
                 "target_port": port,
                 # The exact headers actually sent (includes anything the
                 # Session added itself, e.g. a Cookie from its jar) rather
@@ -797,11 +818,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         verify = qs.get("verify", ["1"])[0] not in ("0", "false", "False")
         client_cert = (qs.get("client_cert", [""])[0]).strip() or None
 
-        if not url or not config_file:
-            self._send(400, "text/plain", b"url and config_file are required")
+        isf, isf_error = parse_isf(qs.get("isf", [""])[0])
+        if isf_error:
+            self._send(400, "text/plain", isf_error.encode("utf-8"))
+            return
+        if not url or (not config_file and not isf):
+            self._send(400, "text/plain", b"url is required, and config_file unless an ISF is chosen")
             return
 
-        entry_port, entry_port_error = parse_entry_port(qs.get("entry_port", [""])[0], config_file)
+        entry_port, entry_port_error = (None, None) if isf else parse_entry_port(qs.get("entry_port", [""])[0], config_file)
         if entry_port_error:
             self._send(400, "text/plain", entry_port_error.encode("utf-8"))
             return
@@ -842,6 +867,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             verify=verify,
             cert=client_cert,
             entry_port=entry_port,
+            isf=isf,
         )
         session = sessions.get_or_create(**session_kwargs)
 

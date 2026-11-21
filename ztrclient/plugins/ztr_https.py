@@ -61,6 +61,27 @@ Also handles: redirect following, per-host cookies, per-request read
 timeouts, multipart/form-data uploads (files=), streaming responses
 (stream=True, Session-based only — see request()'s docstring), and a
 verify=/cert= knob for TLS validation.
+
+Through your own ISF — `isf=`:
+
+    resp = ztr_https.get("https://example.com/", isf="home")   # a named ISF
+    resp = ztr_https.get("https://example.com/", isf=True)     # your default ISF
+    with ztr_https.Session(isf="home", config_file="US_c6c0ed68.ztr") as s:   # another route
+        s.get("https://example.com/a")
+        s.get("https://example.com/b")   # same origin -> same ISF session, same TLS connection
+
+The route no longer ends at the exit hop's own connection to the site: it ends at an ISF you run
+(see ztr_isf_client.py / isf_ssh), which opens the connection to the site. Each connection this
+Session makes is one single-use ISF session, created through the ISF's signed, end-to-end
+encrypted control channel and closed with the connection. The ISF's list of destinations must
+allow the host:port (the dashboard's Allowlist panel, or `ztr_isf_client.py ctrl allow-add`).
+
+TLS is still driven here, end to end with the site: the ISF carries TLS records and never sees the
+request, the response or the certificate exchange in the clear, and the exit hop sees only the
+ISF's own encrypted frames. The site's address is named only inside the encrypted ISF channel, so
+the exit-hop wrapper for the ClientHello (for_exit) isn't needed and isn't used. Name resolution
+happens on the ISF. `isf=` needs ztr_isf_client.py importable (next to this file, in ~/isf, or via
+$ISF_CLIENT_DIR) and the ISF list set up with isf_ssh --save / the dashboard.
 """
 import gzip
 import json as _json
@@ -126,6 +147,112 @@ class _TunnelIO:
             pass
 
 
+_ISF_CLIENT = None
+
+
+def _load_isf_client():
+    """Imports ztr_isf_client on first use of isf=, from next to this file, ~/isf, or $ISF_CLIENT_DIR."""
+    global _ISF_CLIENT
+    if _ISF_CLIENT is not None:
+        return _ISF_CLIENT
+    for d in (os.environ.get("ISF_CLIENT_DIR"), SCRIPT_DIR, os.path.join(SCRIPT_DIR, "ztr_isf"),
+              os.path.join(os.path.expanduser("~"), "isf")):
+        if d and os.path.isfile(os.path.join(d, "ztr_isf_client.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import ztr_isf_client
+            _ISF_CLIENT = ztr_isf_client
+            return _ISF_CLIENT
+    raise TunnelError("isf= needs ztr_isf_client.py — put it next to ztr_https.py, in ~/isf, or set ISF_CLIENT_DIR")
+
+
+def list_isfs():
+    """The ISFs set up on this machine (the list isf_ssh and the ISF dashboard manage), for plugins that offer a
+    choice: name, masked address, route, whether it is the default, whether its public key is installed.
+    [] when there are none or ztr_isf_client isn't available. Addresses are masked (138.197.x.x) on purpose."""
+    try:
+        C = _load_isf_client()
+        ps = C.Profiles()
+        out = []
+        for name in ps.names:
+            p = ps.get(name)
+            out.append({"name": name, "host": C.mask_host(p["host"]), "route": p["route"], "default": name == ps.default_name,
+                        "key_installed": os.path.exists(p["isf_pub"]), "note": p.get("note", "")})
+        return out
+    except Exception:
+        return []
+
+
+def check_isf(value):
+    """Normalises an ISF choice coming from a UI, a file or a command line: None / "" / False -> None (no ISF),
+    True or "@default" -> the default ISF's name, a name -> that name if it exists. Anything else raises ValueError
+    with a message fit to show the user."""
+    if value in (None, "", False):
+        return None
+    names = [i["name"] for i in list_isfs()]
+    if value is True or value == "@default":
+        default = next((i["name"] for i in list_isfs() if i["default"]), None)
+        if not default:
+            raise ValueError("no ISF is set up yet — add one with isf_ssh --save or the ISF dashboard")
+        return default
+    if not isinstance(value, str) or value not in names:
+        raise ValueError(f"no ISF named {value!r}" + (f" (known: {', '.join(names)})" if names else " — none is set up yet"))
+    return value
+
+
+class _IsfIO:
+    """Same send()/recv()/set_timeout()/close() shape as _TunnelIO, over one ISF data tunnel (a
+    ztr_isf_client.DataTunnel): bytes in, encrypted frames to the ISF, which bridges them to the site.
+    recv() hands back the decrypted stream like a socket would, so _TLSTunnel and the HTTP reader
+    above don't know the difference."""
+
+    def __init__(self, tunnel, isf_error):
+        self._t = tunnel
+        self._isf_error = isf_error
+        self._buf = bytearray()
+        self._eof = False
+
+    def send(self, data: bytes, for_exit: bool = True) -> None:
+        # for_exit is a hop-chain concern (hiding the target from entry/middle hops). Here the site is only ever
+        # named inside the end-to-end encrypted ISF channel, so there is nothing for the exit to be shown.
+        try:
+            self._t.send_data(data)
+        except (OSError, TunnelError, self._isf_error) as e:
+            raise NetworkError(f"failed to send through the ISF tunnel: {e}") from e
+
+    def recv(self, nbytes: int) -> bytes:
+        while not self._buf and not self._eof:
+            try:
+                ftype, data = self._t.recv()
+            except socket.timeout:
+                raise NetworkError("read timed out")
+            except (OSError, TunnelError, self._isf_error) as e:
+                raise NetworkError(f"connection through the ISF dropped: {e}") from e
+            if ftype == 0:  # data frame
+                self._buf += data
+            else:           # FIN or ERR: the site (or the ISF) ended the stream
+                self._eof = True
+        out = bytes(self._buf[:nbytes])
+        del self._buf[:nbytes]
+        return out
+
+    @property
+    def _sock(self):
+        """The data tunnel's socket. ztr_proxy shuts it down to wake a thread blocked in recv() (close() alone
+        doesn't), the same as it does for a _TunnelIO's socket."""
+        return self._t._sock
+
+    def set_timeout(self, seconds) -> None:
+        self._t.set_timeout(seconds)
+
+    def close(self) -> None:
+        try:
+            self._t.send_fin()
+        except Exception:
+            pass
+        self._t.close()
+
+
 def _dn_to_dict(rdn_sequence) -> dict:
     """ssl's getpeercert() represents a distinguished name (subject/issuer)
     as ((("commonName", "x"),), (("organizationName", "y"),), ...) — RDNs
@@ -184,12 +311,16 @@ def _extract_route_info(client: RelayClient) -> dict:
         {"hop": hop.get("hop"), "role": hop.get("role"), "address": hop.get("address"), "status": hop.get("status")}
         for hop in chain
     ]
-    return {
+    info = {
         "entry_hop": client.entry_hop,
         "entry_port": client.PORT,
         "exit_hop": client.exit_hop,
         "hops": hops,
     }
+    isf = getattr(client, "isf_info", None)  # set only for connections made with isf=
+    if isf:
+        info["isf"] = dict(isf)
+    return info
 
 
 class _TLSTunnel:
@@ -619,18 +750,30 @@ class Session:
     every tunnel this Session opens to one lane of the entry hop (it has
     to be one of the route's hop_settings.services_ports); None, the
     default, picks the least-used lane per new connection.
+
+    `isf` sends every connection through one of your own ISFs instead of
+    having the exit hop connect to the site: a name from your ISF list,
+    True for the default one, or an already-built ztr_isf_client.Target.
+    `config_file` is then optional — it overrides that ISF's route for this
+    Session. `entry_port` is ignored with an ISF (the route's lane is picked
+    per connection). See the module docstring.
     """
 
     def __init__(
         self,
-        config_file: str,
+        config_file: str = None,
         ttl: int = 86400,
         timeout: float = 30,
         verify=True,
         cert=None,
         with_timing_defense: bool = False,
         entry_port: int = None,
+        isf=None,
     ):
+        if config_file is None and not isf:
+            raise ValueError("config_file is required unless isf= is given")
+        self._isf = isf if isf else None  # a name, True, or a Target; None = the exit hop connects to the site
+        self._isf_target = None
         self._config_file = config_file
         self._ttl = ttl
         self._timeout = timeout
@@ -673,6 +816,8 @@ class Session:
         # itself; a number pins every tunnel this Session opens to that
         # lane of the entry hop (and so to that lane's one cached
         # authorization, instead of one per lane).
+        if self._isf is not None:
+            return self._open_isf_connection(scheme, domain, port)
         client = RelayClient(target_host=domain, port=self._entry_port, config_file=self._config_file)
         if self._entry_port is not None:
             lanes = client.settings("services_ports")[client.transport_type]
@@ -696,6 +841,41 @@ class Session:
         else:
             conn = io
         return conn, client
+
+    def _open_isf_connection(self, scheme: str, domain: str, port: int):
+        """One connection through the ISF: create a single-use session for domain:port over the ISF's control
+        channel, open its encrypted data tunnel, then (https) run TLS with the site over it. The domain is
+        handed to the ISF as given and resolved there — never here, never by the exit hop."""
+        C = _load_isf_client()
+        if self._isf_target is None:
+            if isinstance(self._isf, (str, bool)):
+                try:
+                    self._isf_target = C.target_for(self._isf if isinstance(self._isf, str) else None, route=self._config_file,
+                                                    timing_defense=self._with_timing_defense, zdir=_ZTR_CLIENT_DIR)
+                except C.IsfError as e:
+                    raise TunnelError(f"ISF: {e}") from e
+            else:
+                self._isf_target = self._isf  # an already-built Target
+        t = self._isf_target
+        name = getattr(t, "name", None) or t.host
+        dest = f"{domain}:{port}"
+        try:
+            made = t.control().call("create", destination=dest, ttl=60, label="ztr_https")
+            tunnel = C.DataTunnel(t.relay_factory(), t.host, t.data_port, bytes.fromhex(made["session_id"]),
+                                  C._b64d(made["key"]), ttl=self._ttl, io_timeout=15)
+            tunnel.open()
+        except C.IsfError as e:
+            hint = " (add it to the ISF's allowlist: the dashboard's Allowlist panel, or ztr_isf_client.py ctrl allow-add)" if "allowlist" in str(e) else ""
+            raise TunnelError(f"via ISF {name!r} to {dest}: {e}{hint}") from e
+        io = _IsfIO(tunnel, C.IsfError)
+        relay = tunnel.relay
+        relay.isf_info = {"name": getattr(t, "name", None), "host": t.host, "destination": dest, "session_id": made["session_id"]}
+        try:
+            conn = _TLSTunnel(io, server_hostname=domain, ssl_context=self._make_ssl_context()) if scheme == "https" else io
+        except Exception:
+            io.close()  # a failed handshake (e.g. an untrusted certificate) must not leave the ISF session open
+            raise
+        return conn, relay
 
     def _cookie_header_for(self, hostname):
         jar = self._cookies.get(hostname)
@@ -942,7 +1122,7 @@ class Session:
         self.close()
 
 
-def request(method: str, url: str, config_file: str, verify=True, cert=None, with_timing_defense=False, **kwargs) -> Response:
+def request(method: str, url: str, config_file: str = None, verify=True, cert=None, with_timing_defense=False, isf=None, **kwargs) -> Response:
     """One-shot convenience — opens a Session, makes one request, closes
     it. For more than one request to the same target, use Session
     directly so the tunnel/TLS connection gets reused. stream=True isn't
@@ -950,29 +1130,29 @@ def request(method: str, url: str, config_file: str, verify=True, cert=None, wit
     directly for that."""
     if kwargs.get("stream"):
         raise ValueError("stream=True needs a Session kept open by the caller — use ztr_https.Session directly")
-    with Session(config_file=config_file, verify=verify, cert=cert, with_timing_defense=with_timing_defense) as session:
+    with Session(config_file=config_file, verify=verify, cert=cert, with_timing_defense=with_timing_defense, isf=isf) as session:
         return session.request(method, url, **kwargs)
 
 
-def get(url: str, config_file: str, **kwargs) -> Response:
+def get(url: str, config_file: str = None, **kwargs) -> Response:
     return request("GET", url, config_file, **kwargs)
 
 
-def post(url: str, config_file: str, **kwargs) -> Response:
+def post(url: str, config_file: str = None, **kwargs) -> Response:
     return request("POST", url, config_file, **kwargs)
 
 
-def put(url: str, config_file: str, **kwargs) -> Response:
+def put(url: str, config_file: str = None, **kwargs) -> Response:
     return request("PUT", url, config_file, **kwargs)
 
 
-def delete(url: str, config_file: str, **kwargs) -> Response:
+def delete(url: str, config_file: str = None, **kwargs) -> Response:
     return request("DELETE", url, config_file, **kwargs)
 
 
-def head(url: str, config_file: str, **kwargs) -> Response:
+def head(url: str, config_file: str = None, **kwargs) -> Response:
     return request("HEAD", url, config_file, **kwargs)
 
 
-def patch(url: str, config_file: str, **kwargs) -> Response:
+def patch(url: str, config_file: str = None, **kwargs) -> Response:
     return request("PATCH", url, config_file, **kwargs)

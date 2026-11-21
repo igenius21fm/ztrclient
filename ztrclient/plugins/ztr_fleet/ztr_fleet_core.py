@@ -9,10 +9,17 @@ opens one tunnel per server through that server's own route, and runs ssh or scp
     ztr_fleet --put app.conf --to /tmp/         send a file to every server
     ztr_fleet --get /var/log/syslog --into logs a file back from every server
     ztr_fleet --shell web1                      a terminal on one server
+    ztr_fleet --isf work 'uptime'               the same, but every server through your ISF called "work"
+
+A server can go through one of your own ISFs (Intermediate Server Forwarders — see ztr_isf_client.py): add
+isf=NAME to its line, or use --isf NAME for a run. The route then carries the traffic to the ISF, the exit hop only
+ever sees the ISF, and the server sees the ISF's address. Its alias must be a real host name or address (an ISF can't
+look up ._ztr aliases) and the ISF must allow it. The ISFs are the ones set up on this machine (~/.ztr_isf/isfs.json).
 
 Needs only Python's standard library, and the tunnel service (ztr_tunnel_lp.py) running. Linux and macOS.
 """
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -63,7 +70,31 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 ROUTE_RE = re.compile(r"^[A-Za-z0-9._-]+\.ztr$")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-RESERVED = {"name", "route", "alias", "user", "port", "key", "group"}
+RESERVED = {"name", "route", "alias", "user", "port", "key", "group", "isf"}
+ISF_RE = re.compile(r"^(@default|[A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
+
+
+def isf_profiles_path():
+    return Path(os.environ.get("ISF_PROFILES") or Path.home() / ".ztr_isf" / "isfs.json")
+
+
+def list_isfs():
+    """The ISFs set up on this machine: [{'name', 'route', 'default'}] (no addresses are read). [] when there are none."""
+    try:
+        data = json.loads(isf_profiles_path().read_text(encoding="utf-8"))
+        profiles = data["isfs"]
+        names = sorted(n for n, p in profiles.items() if isinstance(p, dict))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+    default = data.get("default") if data.get("default") in names else (names[0] if names else None)
+    return [{"name": n, "route": str(profiles[n].get("route") or ""), "default": n == default} for n in names]
+
+
+def isf_args(isf):
+    """The ztr_ssh / ztr_forward words that send a session through this ISF ("@default" = your default one)."""
+    if not isf:
+        return []
+    return ["--isf"] if isf == "@default" else ["--isf", isf]
 
 
 @dataclass
@@ -76,6 +107,7 @@ class Server:
     key: str = ""
     group: str = ""
     vars: dict = field(default_factory=dict)
+    isf: str = ""      # the name of one of your ISFs ("" = none, "@default" = your default one)
 
     def problems(self, routes_dir=None):
         found = []
@@ -93,6 +125,15 @@ class Server:
             found.append("The port isn't a number")
         if self.group and not NAME_RE.match(self.group):
             found.append("The group may only use letters, digits, . _ -")
+        if self.isf:
+            if not ISF_RE.match(self.isf):
+                found.append("The ISF should be the name of one of your ISFs (letters, digits, . _ -)")
+            elif routes_dir is not None and self.isf != "@default" and self.isf not in [i["name"] for i in list_isfs()]:
+                found.append("There's no ISF called %s on this computer" % self.isf)
+            elif routes_dir is not None and self.isf == "@default" and not list_isfs():
+                found.append("You haven't set up an ISF on this computer yet")
+            if (self.alias or "").endswith("._ztr"):
+                found.append("An ISF can't look up ._ztr aliases — give the server's real host name or address")
         if self.key and not os.path.isfile(os.path.expanduser(self.key)):
             found.append("The key file doesn't exist")
         for k, v in self.vars.items():
@@ -104,7 +145,7 @@ class Server:
 
     def values(self):
         """What {name}, {alias}, … stand for in a command for this server."""
-        base = dict(name=self.name, alias=self.alias, user=self.user, port=str(self.port), route=self.route, group=self.group)
+        base = dict(name=self.name, alias=self.alias, user=self.user, port=str(self.port), route=self.route, group=self.group, isf=self.isf)
         base.update(self.vars)
         return base
 
@@ -122,7 +163,7 @@ def parse_fleet(text):
         name, route, alias, user = fields[:4]
         port = fields[4] if len(fields) > 4 else "-"
         port = "22" if port == "-" else port
-        key = group = ""
+        key = group = isf = ""
         extra_vars = {}
         bad = None
         for extra in fields[5:]:
@@ -130,6 +171,8 @@ def parse_fleet(text):
                 key = extra[4:]
             elif extra.startswith("group="):
                 group = extra[6:]
+            elif extra.startswith("isf="):
+                isf = extra[4:]
             elif "=" in extra and VAR_RE.match(extra.split("=", 1)[0]) and extra.split("=", 1)[0] not in RESERVED:
                 k, v = extra.split("=", 1)
                 extra_vars[k] = v
@@ -142,7 +185,7 @@ def parse_fleet(text):
             problems.append((number, "the name '%s' is used twice" % name))
             continue
         seen.add(name)
-        servers.append(Server(name, route, alias, user, port, key, group, extra_vars))
+        servers.append(Server(name, route, alias, user, port, key, group, extra_vars, isf))
     return servers, problems
 
 
@@ -150,12 +193,12 @@ def format_fleet(servers, header=None):
     """The fleet file for these servers, columns lined up."""
     rows = []
     for s in servers:
-        extras = ([("group=" + s.group)] if s.group else []) + ([("key=" + s.key)] if s.key else []) + ["%s=%s" % kv for kv in sorted(s.vars.items())]
+        extras = ([("group=" + s.group)] if s.group else []) + ([("key=" + s.key)] if s.key else []) + ([("isf=" + s.isf)] if s.isf else []) + ["%s=%s" % kv for kv in sorted(s.vars.items())]
         rows.append((s.name, s.route, s.alias, s.user, str(s.port), " ".join(extras)))
     head = ("# name", "route file", "alias (--rh)", "user", "port", "options")
     widths = [max(len(r[i]) for r in rows + [head]) for i in range(5)]
     lines = list(header or ["# Servers for ztr_fleet. One per line: name, route file, alias, user, ssh port, then options",
-                            "# (group=NAME, key=PATH, or your own NAME=value for use as {NAME} in commands). `ztr_fleet --example` shows the format."])
+                            "# (group=NAME, key=PATH, isf=NAME, or your own NAME=value for use as {NAME} in commands). `ztr_fleet --example` shows the format."])
     lines.append("  ".join(head[i].ljust(widths[i]) for i in range(5)).rstrip() + "  options")
     for r in rows:
         lines.append(("  ".join(r[i].ljust(widths[i]) for i in range(5)) + ("  " + r[5] if r[5] else "")).rstrip())
@@ -205,7 +248,7 @@ def ferry_servers():
     for name, s in sites.items():
         safe = re.sub(r"[^A-Za-z0-9._-]", "-", name) or "site"
         found.append(Server(safe, s.get("route") or "route.ztr", s.get("host", ""), s.get("user") or "root",
-                            str(s.get("port") or "22"), s.get("key_path") or "", ""))
+                            str(s.get("port") or "22"), s.get("key_path") or "", "", {}, s.get("isf") or ""))
     return found
 
 
@@ -312,7 +355,7 @@ INNER = {
     "get": 'exec scp -q -r -P "$ZTR_LOCAL_PORT" ' + _SSH_OPTS + ' -- "$3@$ZTR_LOCAL_IP:$4" "$6"',
 }
 INNER["INNER"] = INNER["cmd"]  # (the original single-command form, for callers that only run commands)
-NOISE = re.compile(r"^\[ztr_forward\] (requesting tunnel|tunnel ready|ending session)")
+NOISE = re.compile(r"^\[ztr_forward\] (requesting tunnel|tunnel ready|ending session|ISF: )")
 
 # With "send my sudo password": the password goes down ssh's standard input, is read once into a variable, and a
 # `sudo` function hands it to sudo only when sudo really needs one (never when the account has a password-free sudo or
@@ -392,7 +435,7 @@ def build_argv(server, job, control_port=CONTROL_PORT, known_hosts=None, forward
         remote, _ = substitute(job["remote"], server)
         local, inner = str(Path(job["into"]) / server.name), INNER["get"]
     argv = [str(forward or FORWARD), "--rh", server.alias, "--rp", str(server.port), "--config-file", server.route,
-            "--cp", str(control_port), "--", "bash", "-c", inner, "_", server.name, str(known_hosts or KNOWN_HOSTS),
+            *isf_args(server.isf), "--cp", str(control_port), "--", "bash", "-c", inner, "_", server.name, str(known_hosts or KNOWN_HOSTS),
             server.user, remote, key, local]
     return argv, stdin
 
@@ -908,7 +951,7 @@ def shell_argv(server, control_port=CONTROL_PORT, ztr_ssh=None):
     if server.key:
         argv += ["-i", os.path.expanduser(server.key), "-o", "IdentitiesOnly=yes"]
     argv += ["-o", "HostKeyAlias=" + server.name, "-o", "UserKnownHostsFile=" + str(KNOWN_HOSTS), "-o", "StrictHostKeyChecking=accept-new",
-             "--rh", server.alias, "--rp", str(server.port), "--config-file", server.route, "--cp", str(control_port)]
+             "--rh", server.alias, "--rp", str(server.port), "--config-file", server.route, *isf_args(server.isf), "--cp", str(control_port)]
     return argv
 
 
@@ -1394,11 +1437,14 @@ EXAMPLE = """\
 web1      web.ztr        web1._ztr          deploy   22                      group=web env=prod
 db1       data.ztr       db1._ztr           deploy   -                       group=data key=~/.ssh/id_db
 edge-eu   eu.ztr         edge-eu._ztr       root     2222
+# a server reached through one of your own ISFs: isf=NAME, and its real host name or address instead of a ._ztr alias
+app1      route.ztr      app1.example.com   deploy   22                      isf=work
 """
 
 EPILOG = """\
 The fleet file lists one server per line (see --example): name, route file, alias, user, ssh port, then options —
-group=NAME (for --group), key=PATH (an ssh key for that server) and your own NAME=value, which a command can use as
+group=NAME (for --group), key=PATH (an ssh key for that server), isf=NAME (through one of your own ISFs: the exit then only
+sees the ISF; the alias must be a real host name or address, and the route carries the traffic to the ISF) and your own NAME=value, which a command can use as
 {NAME}. A command can also use {name}, {alias}, {user}, {port}, {route} and {group}; write {{name}} to keep the braces.
 It is read from ./fleet.conf if that exists, otherwise ~/.config/ztr_fleet/fleet.conf ($ZTR_FLEET_FILE or --file
 choose another).
@@ -1437,6 +1483,9 @@ def build_parser():
     a("--file", help="the fleet file")
     a("--only", help="only these servers (comma-separated names)")
     a("--group", help="only the servers in this group")
+    a("--isf", metavar="NAME", help="send every selected server through this ISF of yours for this run (@default = your default one; none = the plain route). "
+                                    "Their aliases must then be real host names or addresses")
+    a("--list-isfs", action="store_true", help="list the ISFs set up on this computer and exit")
     a("--jobs", type=int, default=4, help="servers contacted at the same time (default 4)")
     a("--timeout", type=int, default=60, help="seconds each server may take, tunnel included (default 60)")
     a("--cp", type=int, default=CONTROL_PORT, help="the tunnel service's control port (default 2223)")
@@ -1482,6 +1531,11 @@ def _select(args):
         print("  Create one (ztr_fleet --example shows the format), or point to it with --file.", file=sys.stderr)
         return None, None, 1
     servers, lines = load_fleet(path)
+    if getattr(args, "isf", None):
+        override = "" if args.isf.lower() in ("none", "off", "no") else args.isf
+        picked = {n.strip() for n in args.only.split(",") if n.strip()} if args.only else None
+        servers = [dataclasses.replace(s, isf=override) if ((picked is None or s.name in picked) and (not args.group or s.group == args.group)) else s
+                   for s in servers]
     problems = 0
     for number, message in lines:
         _err("%s:%d: %s" % (path, number, message))
@@ -1512,7 +1566,7 @@ def _print_check(chosen, service):
     wn = max([4] + [len(s.name) for s in chosen]); wr = max([5] + [len(s.route) for s in chosen]); wa = max([5] + [len(s.alias) for s in chosen])
     print("%-*s  %-*s  %-*s  %-18s  %s" % (wn, "NAME", wr, "ROUTE", wa, "ALIAS", "USER@PORT", "GROUP / KEY / VARIABLES"))
     for s in chosen:
-        extra = " ".join(([s.group] if s.group else []) + (["key"] if s.key else []) + ["%s=%s" % kv for kv in sorted(s.vars.items())]) or "-"
+        extra = " ".join(([s.group] if s.group else []) + (["key"] if s.key else []) + (["isf=" + s.isf] if s.isf else []) + ["%s=%s" % kv for kv in sorted(s.vars.items())]) or "-"
         print("%-*s  %-*s  %-*s  %-18s  %s" % (wn, s.name, wr, s.route, wa, s.alias, "%s@%s" % (s.user, s.port), extra))
     print("%d server(s) look fine; the tunnel service is %sanswering." % (len(chosen), "" if service else "NOT "))
 
@@ -1546,6 +1600,13 @@ def cli(argv=None):
     command = " ".join(args.command[1:] if args.command[:1] == ["--"] else args.command)
     if args.example:
         sys.stdout.write(EXAMPLE)
+        return 0
+    if args.list_isfs:
+        found = list_isfs()
+        if not found:
+            print("No ISF is set up on this computer (isf_ssh --save ... or the ISF dashboard adds one).")
+        for i in found:
+            print("%s%-20s route %s" % ("* " if i["default"] else "  ", i["name"], i["route"]))
         return 0
     if args.list_jobs:
         saved = load_saved_jobs()
@@ -1680,7 +1741,7 @@ def cli(argv=None):
                 argv_s, _stdin = build_argv(s, job, args.cp)
                 shown = substitute(job["command"], s)[0] if job["kind"] == "cmd" else (
                     "%s (on %s)" % (describe_job(job), argv_s[argv_s.index("_") + 4])) if job["kind"] == "script" else describe_job(job)
-                print("    %-12s via %-14s as %s@%s  →  %s" % (s.name, s.route, s.user, s.alias if len(s.alias) < 30 else s.alias[:14] + "…", shown))
+                print("    %-12s via %-14s as %s@%s  →  %s" % (s.name, s.route + (" > ISF " + s.isf if s.isf else ""), s.user, s.alias if len(s.alias) < 30 else s.alias[:14] + "…", shown))
         for why in serious:
             print("  ! this %s" % why)
         for why in notices:

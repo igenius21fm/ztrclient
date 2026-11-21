@@ -868,6 +868,40 @@ $(function () {
   }
   $('#routeSelect').on('change', () => loadEntryPorts());
 
+  // ---------------- Via ISF ----------------
+  // The ISFs set up on this machine (the list isf_ssh and the ISF dashboard manage), by name with a masked address.
+  // Choosing one sends every connection of this request through it instead of letting the exit hop connect to the
+  // site. It brings its own route, which is selected here (the route list can still override it); the entry port
+  // doesn't apply, the lane is picked per connection.
+  let isfList = [];
+  function syncIsfUi() {
+    const on = !!$('#isfSelect').val();
+    $('#entryPort').prop('disabled', on);
+  }
+  function loadIsfs(preferred) {
+    return $.get('/api/isfs').done((res) => {
+      isfList = res.isfs || [];
+      const $sel = $('#isfSelect');
+      const keep = preferred !== undefined ? preferred : $sel.val();
+      $sel.empty().append('<option value="">None — the exit hop connects</option>');
+      isfList.forEach((i) => {
+        const label = `${i.name}${i.default ? ' ★' : ''} · ${i.host} · ${i.route}${i.key_installed ? '' : ' (key missing)'}`;
+        $sel.append(`<option value="${escapeHtml(i.name)}">${escapeHtml(label)}</option>`);
+      });
+      $sel.val(isfList.some((i) => i.name === keep) ? keep : '');
+      syncIsfUi();
+    });
+  }
+  $('#isfSelect').on('change', function () {
+    const isf = isfList.find((i) => i.name === $(this).val());
+    if (isf && $('#routeSelect option').toArray().some((o) => o.value === isf.route)) {
+      $('#routeSelect').val(isf.route);
+      loadEntryPorts();
+    }
+    syncIsfUi();
+  });
+  loadIsfs();
+
   loadEnvironments();
   loadVars();
 
@@ -1009,6 +1043,9 @@ $(function () {
     syncParamsFromUrl();
     if (item.config_file) $('#routeSelect').val(item.config_file);
     loadEntryPorts(item.entry_port); // null/undefined -> Auto
+    // a saved request that went through an ISF that has since been removed falls back to "None"
+    $('#isfSelect').val(isfList.some((i) => i.name === item.isf) ? item.isf : '');
+    syncIsfUi();
     $('#targetPort').val(item.target_port || '');
     $('#withTimingDefense').prop('checked', !!item.with_timing_defense);
     $('#timeoutInput').val(item.timeout || '');
@@ -1099,7 +1136,7 @@ $(function () {
         const flagParts = [p.with_timing_defense ? 'timing-defense' : 'plain'];
         if (p.verify === false) flagParts.push('TLS unverified');
         if (p.client_cert) flagParts.push('client cert');
-        flagParts.push(p.entry_port ? `entry port ${p.entry_port}` : 'auto port');
+        flagParts.push(p.isf ? `via ISF ${p.isf}` : (p.entry_port ? `entry port ${p.entry_port}` : 'auto port'));
         const flags = flagParts.join(' · ');
         const origins = p.origins && p.origins.length ? p.origins.join(', ') : 'no open connections yet';
         const $row = $(`
@@ -1137,6 +1174,7 @@ $(function () {
       headers: collectKVRows($('#headerRows')),
       body: $('#bodyInput').val() || undefined,
       config_file: $('#routeSelect').val(),
+      isf: $('#isfSelect').val() || undefined,
       entry_port: parseInt($('#entryPort').val(), 10) || undefined,
       target_port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),
@@ -1269,6 +1307,13 @@ $(function () {
         icon: 'icon-lock',
         kind: h.status && h.status !== 'online' ? 'warn' : 'hop',
       })),
+      ...(routeInfo.isf ? [{
+        title: 'Your ISF',
+        sub: routeInfo.isf.name || 'ISF',
+        full: `Through your ISF${routeInfo.isf.name ? ' ' + routeInfo.isf.name : ''}`,
+        icon: 'icon-plug',
+        kind: 'isf',
+      }] : []),
       { title: 'Target', sub: currentTargetHost(), icon: 'icon-globe', kind: 'endpoint' },
     ];
 
@@ -1304,7 +1349,9 @@ $(function () {
     });
     svg += '</svg>';
 
-    const lane = routeInfo.entry_port
+    const lane = routeInfo.isf
+      ? `<div class="pool-flags">Through your ISF${routeInfo.isf.name ? ' ' + escapeHtml(routeInfo.isf.name) : ''}: the site sees the ISF's address, and the exit hop only the ISF's encrypted frames</div>`
+      : routeInfo.entry_port
       ? `<div class="pool-flags">Entry port ${escapeHtml(String(routeInfo.entry_port))}${$('#entryPort').val() ? '' : ' · auto-selected'}</div>`
       : '';
     $card.empty()
@@ -1548,7 +1595,8 @@ $(function () {
     const params = new URLSearchParams();
     params.set('url', url);
     params.set('config_file', configFile);
-    if (entryPort) params.set('entry_port', entryPort);
+    if ($('#isfSelect').val()) params.set('isf', $('#isfSelect').val());
+    else if (entryPort) params.set('entry_port', entryPort);
     if (port) params.set('port', String(port));
     if (withTimingDefense) params.set('with_timing_defense', '1');
     if (timeout) params.set('timeout', String(timeout));
@@ -2003,6 +2051,7 @@ $(function () {
     const headers = buildHeaders(rawHeaders, authHeader);
     const payload = {
       config_file: configFile,
+      isf: $('#isfSelect').val() || undefined,
       entry_port: parseInt($('#entryPort').val(), 10) || undefined,
       port: parseInt($('#targetPort').val(), 10) || undefined,
       with_timing_defense: $('#withTimingDefense').is(':checked'),

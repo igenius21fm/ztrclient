@@ -41,7 +41,7 @@ from ztr_fleet_core import (  # noqa: E402
     norm_hook, hook_title, hook_wanted, fix_executable, scan_hooks_folder, create_hook, run_hook, HOOK_TEMPLATES,
     run_summary_hook, summary_payload, collect_followups, followup_targets, load_saved_jobs, save_saved_jobs, norm_saved_job,
     saved_job_problems, saved_job_servers, describe_schedule, norm_schedule, install_schedule, remove_schedule, schedule_status,
-    schedule_available, DAYS, DEFAULT_OPTS, job_log_path, route_country, route_label)
+    schedule_available, DAYS, DEFAULT_OPTS, job_log_path, route_country, route_label, list_isfs)
 try:
     from ztr_flags import FLAGS  # noqa: E402  (small flag images by country code; without them the code is shown instead)
 except ImportError:
@@ -165,7 +165,7 @@ def plan_lines(chosen, job, opts):
         if len(plan) > 1:
             lines.append("Batch %d" % index)
         for s in group:
-            where = "%s via %s as %s" % (s.name, route_label(s.route), s.user)
+            where = "%s via %s%s as %s" % (s.name, route_label(s.route), (" and ISF " + ("default" if s.isf == "@default" else s.isf)) if s.isf else "", s.user)
             if job["kind"] == "cmd":
                 what = substitute(job["command"], s)[0]
                 if job.get("sudo_password") or job.get("sudo_passwords") or opts.get("sudo"):
@@ -1410,6 +1410,8 @@ def build_app():
                 # one line that always fits the list: "route · user@alias", the alias shortened in the middle when it is long
                 # (a line wider than the list would be cut off at both ends, and a flag at its left end with it)
                 head = s.route if flag else route_label(s.route)
+                if s.isf:
+                    head += "  ·  ISF " + ("default" if s.isf == "@default" else s.isf)
                 tail = "%s@%s" % (s.user, s.alias)
                 room = max(16, ROW_CHARS - len(head) - 5)
                 if len(tail) > room:
@@ -1510,7 +1512,7 @@ def build_app():
             body.columnconfigure(1, weight=1)
             ttk.Label(body, text="Add a server" if new else "Edit " + server.name, style="H.TLabel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
             v = {k: tk.StringVar(value=getattr(server, k, d) if server else d)
-                 for k, d in (("name", ""), ("alias", ""), ("user", "root"), ("port", "22"), ("route", ""), ("group", ""), ("key", ""))}
+                 for k, d in (("name", ""), ("alias", ""), ("user", "root"), ("port", "22"), ("route", ""), ("group", ""), ("key", ""), ("isf", ""))}
             routes = list_routes()
             if new and routes and not v["route"].get():
                 v["route"].set(routes[0])
@@ -1533,6 +1535,14 @@ def build_app():
             keyfield = line(7, "SSH key file (optional)", "key")
             vars_var = tk.StringVar(value=format_vars(server.vars) if server else "")
             line(8, "Variables (optional)", None, Field(body, compact=True, textvariable=vars_var, width=34, placeholder="env=prod region=eu"))
+            # optional: through one of your own ISFs (the alias must then be a real host name or address)
+            isf_names = {"No ISF": ""}
+            isf_names.update({("%s  ·  default" % i["name"] if i["default"] else i["name"]): i["name"] for i in list_isfs()})
+            if v["isf"].get() and v["isf"].get() not in isf_names.values():
+                isf_names[v["isf"].get()] = v["isf"].get()       # an ISF the file names that isn't set up here: keep it visible
+            isf_shown = tk.StringVar(value=next((k for k, n in isf_names.items() if n == v["isf"].get()), "No ISF"))
+            isf_shown.trace_add("write", lambda *a: v["isf"].set(isf_names.get(isf_shown.get(), "")))
+            line(9, "Via ISF (optional)", "isf", Combo(body, compact=True, textvariable=isf_shown, width=32, values=list(isf_names)))
 
             def browse():
                 from tkinter import filedialog
@@ -1541,11 +1551,11 @@ def build_app():
                     v["key"].set(path)
             Btn(body, text="Browse…", style="Small.TButton", command=browse).grid(row=7, column=2, padx=(8, 0))
             ttk.Label(body, text="Commands can use {name}, {env}, … — each server fills in its own. A script gets them as $ZTR_NAME, $ZTR_ENV.",
-                      style="Dim.TLabel", wraplength=420, justify="left").grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
+                      style="Dim.TLabel", wraplength=420, justify="left").grid(row=10, column=0, columnspan=3, sticky="w", pady=(2, 0))
             note = ttk.Label(body, text="", style="Warn.TLabel", wraplength=420, justify="left")
-            note.grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            note.grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
             row = ttk.Frame(body, style="Card.TFrame")
-            row.grid(row=11, column=0, columnspan=3, sticky="e", pady=(14, 0))
+            row.grid(row=12, column=0, columnspan=3, sticky="e", pady=(14, 0))
 
             def save():
                 values, why = parse_vars(vars_var.get())
@@ -1553,7 +1563,7 @@ def build_app():
                     note.configure(text=why)
                     return
                 candidate = Server(v["name"].get().strip(), v["route"].get().strip(), v["alias"].get().strip(), v["user"].get().strip() or "root",
-                                   v["port"].get().strip() or "22", v["key"].get().strip(), v["group"].get().strip(), values)
+                                   v["port"].get().strip() or "22", v["key"].get().strip(), v["group"].get().strip(), values, v["isf"].get().strip())
                 problems = candidate.problems(None if self.demo else ROUTES_DIR)
                 if any(s.name == candidate.name and s is not server for s in self.servers):
                     problems.insert(0, "Another server already has that name")

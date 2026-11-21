@@ -20,7 +20,7 @@ MAX_ROWS = 200
 # everything that had ever come back, on every single request. get() still
 # returns the full row, for the day something wants to show a past response.
 LIST_COLUMNS = (
-    "id, created_at, method, url, target_host, target_port, config_file, "
+    "id, created_at, method, url, target_host, target_port, config_file, isf, "
     "request_headers, request_body, ok, status_code, error, elapsed_ms"
 )
 
@@ -56,6 +56,11 @@ class HistoryStore:
                 )
                 """
             )
+            # isf was added after the table existed on deployed instances: a guarded, idempotent ALTER (the same
+            # approach collection_store takes), since CREATE TABLE IF NOT EXISTS above is a no-op against an old table.
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(history)")}
+            if "isf" not in existing:
+                conn.execute("ALTER TABLE history ADD COLUMN isf TEXT")
             conn.commit()
 
     def add(self, entry: dict) -> int:
@@ -65,8 +70,8 @@ class HistoryStore:
                 INSERT INTO history (
                     created_at, method, url, target_host, target_port, config_file,
                     request_headers, request_body, ok, status_code,
-                    response_headers, response_body, error, elapsed_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    response_headers, response_body, error, elapsed_ms, isf
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(),
@@ -83,6 +88,7 @@ class HistoryStore:
                     entry.get("response_body"),
                     entry.get("error"),
                     entry.get("elapsed_ms"),
+                    entry.get("isf") or None,
                 ),
             )
             row_id = cur.lastrowid

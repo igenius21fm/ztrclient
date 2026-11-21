@@ -2,10 +2,12 @@ import asyncio
 import itertools
 import json
 import os
+import re
 import secrets
 import socket
 import struct
 import sys
+import threading
 import time
 from collections import OrderedDict
 
@@ -50,6 +52,19 @@ from ztrClient import ConfigError, ConfigFieldError, ConfigNotFoundError, Config
               this session uses that route instead of the service's default)
           -> {"status": true, "session_id": "...", "local_ip": "10.10.15.10", "local_port": 51234, "warm": false}
           -> {"status": false, "error": "..."}
+
+        START through your own ISF (Intermediate Server Forwarder — see ztr_isf_client.py):
+              {"cmd": "start", "relay_name": "host.example.com", "target_port": 22, "isf": "work"}
+              "isf" is the name of one of your ISFs ("@default" = your default one); "relay_name" is then the
+              server's real host name or address — an ISF can't look up ._ztr aliases. optional: "config_file"
+              (the route that carries the traffic to the ISF; default: the route saved with that ISF).
+              The ISF is asked for the connection when START arrives, so a destination it refuses fails right
+              here; the answer carries "isf": "work" and "path": [...] (what the connection goes through, with
+              the addresses masked). Every connection to the local port then goes your machine -> ZTRelay -> your
+              ISF -> the server, and the exit hop only ever sees the ISF. There's no spare-tunnel pool for these
+              (each connection asks the ISF for its own single-use session), so each takes a moment longer to open.
+              A caller that asked for an ISF must check that the answer says "isf" — a service from before this
+              existed would ignore the field and connect without it.
 
         END   {"cmd": "end", "session_id": "..."}
           -> {"status": true}
@@ -197,6 +212,159 @@ class Session:
         # looks at this when active_connections == 0, so a long-running
         # connection is never reaped no matter how old this timestamp gets.
         self.idle_since = time.monotonic()
+
+
+# ---------- ISF: sessions that go through one of your own Intermediate Server Forwarders ----------
+
+PLUGINS_DIR = os.path.dirname(os.path.abspath(__file__))
+_ISF_CLIENT = None
+_ISF_NAME_RE = re.compile(r"^(@default|[A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
+_ISF_HOST_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}$")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _load_isf_client():
+    """Imports ztr_isf_client on first use of an ISF, from next to this file, ~/isf, or $ISF_CLIENT_DIR."""
+    global _ISF_CLIENT
+    if _ISF_CLIENT is not None:
+        return _ISF_CLIENT
+    for d in (os.environ.get("ISF_CLIENT_DIR"), PLUGINS_DIR, os.path.join(PLUGINS_DIR, "ztr_isf"),
+              os.path.join(os.path.expanduser("~"), "isf")):
+        if d and os.path.isfile(os.path.join(d, "ztr_isf_client.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import ztr_isf_client
+            _ISF_CLIENT = ztr_isf_client
+            return _ISF_CLIENT
+    raise ValueError("an ISF needs ztr_isf_client.py — put it next to ztr_tunnel_lp.py, in ~/isf, or set ISF_CLIENT_DIR")
+
+
+class _NoCache:
+    def delete(self, _tunnel_id):
+        pass
+
+
+class _IsfClient:
+    """The few RelayClient fields the session list and END look at."""
+
+    def __init__(self, session_id, host, port):
+        self.session_id, self.TARGET_HOST, self.TARGET_PORT = session_id, host, port
+        self.tunnel_id, self.tunnel_cache = "", _NoCache()
+
+
+class _IsfRoute:
+    def __init__(self, config_file):
+        self.config_file = config_file
+
+
+class IsfSession:
+    """A local listener whose every connection goes ZTRelay -> your ISF -> host:port. Each connection asks the ISF
+    for its own single-use session; the one made when the session started (so a refused destination fails at START)
+    is used by the first connection if that comes soon enough."""
+
+    PREPARED_MAX_AGE = 45  # seconds; the ISF keeps an unused session for 60
+    ACCEPT_BACKLOG = 32
+
+    def __init__(self, C, target, host, port, sock, prepared):
+        self.C, self.target, self.host, self.port = C, target, host, port
+        self.client = _IsfClient("isf-" + secrets.token_hex(8), host, port)
+        self.route = _IsfRoute(target.route)
+        self.isf = target.name or "default"
+        self.server = self  # END closes session.server and waits for it
+        self.local_port = sock.getsockname()[1]
+        self.warm = False
+        self.active_connections = 0
+        self.idle_since = time.monotonic()
+        self._sock = sock
+        self._lock = threading.Lock()
+        self._closed = False
+        self._prepared = (prepared, time.monotonic())
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    # -- what END / the reaper call
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            prepared, self._prepared = self._prepared, None
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        if prepared:  # never used: don't leave it pending on the ISF
+            threading.Thread(target=self._discard, args=(prepared[0],), daemon=True).start()
+
+    async def wait_closed(self):
+        return None
+
+    def _discard(self, made):
+        try:
+            self.target.control().call("delete", session_id=made["session_id"])
+        except Exception:
+            pass  # it expires on its own
+
+    # -- connections
+    def _accept_loop(self):
+        while not self._closed:
+            try:
+                conn, addr = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn, addr), daemon=True).start()
+
+    def _take_prepared(self):
+        with self._lock:
+            held, self._prepared = self._prepared, None
+        if held and time.monotonic() - held[1] < self.PREPARED_MAX_AGE:
+            return held[0]
+        if held:
+            self._discard(held[0])
+        return None
+
+    def _create(self):
+        return self.target.control().call("create", destination=f"{self.host}:{self.port}", ttl=60, label="ztr_tunnel")
+
+    def _open(self):
+        C, t = self.C, self.target
+        made = self._take_prepared()
+        used_prepared = made is not None
+        for attempt in (1, 2):
+            if made is None:
+                made = self._create()
+            tunnel = C.DataTunnel(t.relay_factory(), t.host, t.data_port, bytes.fromhex(made["session_id"]),
+                                  C._b64d(made["key"]), io_timeout=15)
+            try:
+                tunnel.open()
+                return tunnel
+            except C.IsfError:
+                tunnel.close()
+                if not (used_prepared and attempt == 1):
+                    raise
+                made, used_prepared = None, False  # the held session had gone stale: one more, fresh
+
+    def _serve(self, conn, addr):
+        started = time.monotonic()
+        with self._lock:
+            self.active_connections += 1
+        tunnel = None
+        try:
+            print(f"[+] {_ts()} Local connection from {addr} (session {self.client.session_id}, via ISF {self.isf})")
+            tunnel = self._open()
+            self.C.bridge_local(tunnel, conn)
+            print(f"[-] {_ts()} Connection closed after {time.monotonic() - started:.1f}s "
+                  f"({_fmt_bytes(tunnel.bytes_sent)} up, {_fmt_bytes(tunnel.bytes_received)} down, via ISF {self.isf})")
+        except Exception as e:
+            hint = " — add it to the ISF's allowlist (the ISF dashboard, or ztr_isf_client.py ctrl allow-add)" if "allowlist" in str(e) else ""
+            print(f"[-] {_ts()} ISF {self.isf}: couldn't connect to {self.host}:{self.port}: {e}{hint}")
+            try:
+                conn.close()
+            except OSError:
+                pass
+        finally:
+            with self._lock:
+                self.active_connections -= 1
+                self.idle_since = time.monotonic()
 
 
 class TunnelProxyServer:
@@ -542,7 +710,62 @@ class TunnelProxyServer:
 
     # ---------- session lifecycle (START / END) ----------
 
-    async def start_session(self, relay_name: str, target_port: int, config_file=None) -> dict:
+    async def _start_isf_session(self, relay_name: str, target_port: int, config_file, isf) -> dict:
+        """START through one of the caller's own ISFs (see the module docstring)."""
+        host = relay_name if isinstance(relay_name, str) else ""
+        if not isinstance(isf, str) or not _ISF_NAME_RE.match(isf):
+            return {"status": False, "error": "isf must be the name of one of your ISFs (or \"@default\")"}
+        if host.endswith("._ztr"):
+            return {"status": False, "error": "an ISF can't look up ._ztr aliases — give the server's real host name or address"}
+        if not _ISF_HOST_RE.match(host):
+            return {"status": False, "error": "with an ISF the server must be a plain host name or address"}
+        if not 1 <= target_port <= 65535:
+            return {"status": False, "error": "the port must be between 1 and 65535"}
+        if config_file and not _is_bare_filename(config_file):
+            return {"status": False, "error": "config_file must be a bare filename in routes/, not a path"}
+        try:
+            C = _load_isf_client()
+        except ValueError as e:
+            return {"status": False, "error": str(e)}
+        zdir = os.path.dirname(PLUGINS_DIR)
+
+        def prepare():
+            t = C.target_for(None if isf == "@default" else isf, route=config_file or None, zdir=zdir)
+            made = t.control().call("create", destination=f"{host}:{target_port}", ttl=60, label="ztr_tunnel")
+            return t, made
+
+        try:
+            target, made = await asyncio.to_thread(prepare)
+        except C.IsfError as e:
+            hint = " (add it to the ISF's allowlist: the ISF dashboard, or ztr_isf_client.py ctrl allow-add)" if "allowlist" in str(e) else ""
+            return {"status": False, "error": f"ISF: {e}{hint}"}
+        except Exception as e:
+            return {"status": False, "error": f"ISF: {e}"}
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.local_ip, 0))
+            sock.listen(IsfSession.ACCEPT_BACKLOG)
+        except OSError as e:
+            sock.close()
+            print(f"[-] Failed to bind {self.local_ip}: {e}")
+            await asyncio.to_thread(lambda: target.control().call("delete", session_id=made["session_id"]))
+            return {"status": False, "error": f"failed to bind {self.local_ip}: {e}"}
+        session = IsfSession(C, target, host, target_port, sock, made)
+        self._sessions[session.client.session_id] = session
+        dest = f"{host}:{target_port}"
+        try:
+            path = [_ANSI_RE.sub("", line) for line in C.path_log_lines(target, zdir, dest)]
+        except Exception:
+            path = []
+        print(f"[*] {_ts()} Session {session.client.session_id} ready on {self.local_ip}:{session.local_port} -> {dest} "
+              f"(via ISF {session.isf}, route {target.route})")
+        return {"status": True, "session_id": session.client.session_id, "local_ip": self.local_ip, "local_port": session.local_port,
+                "warm": False, "isf": session.isf, "path": path}
+
+    async def start_session(self, relay_name: str, target_port: int, config_file=None, isf=None) -> dict:
+        if isf:
+            return await self._start_isf_session(relay_name, target_port, config_file, isf)
         try:
             route = self._resolve_route(config_file)
         except ValueError as e:
@@ -622,6 +845,7 @@ class TunnelProxyServer:
                 "local_port": session.local_port,
                 "active_connections": session.active_connections,
                 "idle_seconds": round(now - session.idle_since, 1) if session.active_connections == 0 else 0.0,
+                **({"isf": session.isf} if getattr(session, "isf", None) else {}),
             }
             for session_id, session in self._sessions.items()
         ]
@@ -674,7 +898,7 @@ class TunnelProxyServer:
                 cmd = request.get("cmd")
                 if cmd == "start":
                     response = await self.start_session(
-                        request["relay_name"], int(request.get("target_port", 22)), request.get("config_file")
+                        request["relay_name"], int(request.get("target_port", 22)), request.get("config_file"), request.get("isf")
                     )
                 elif cmd == "end":
                     response = await self.end_session(request["session_id"])

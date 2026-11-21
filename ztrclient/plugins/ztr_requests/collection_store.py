@@ -51,7 +51,7 @@ class CollectionStore:
     # -running install picks these up, hence the guarded, idempotent add.
     def _migrate(self, conn):
         existing = {row[1] for row in conn.execute("PRAGMA table_info(collection)")}
-        for col, decl in (("timeout", "REAL"), ("verify", "INTEGER"), ("client_cert", "TEXT"), ("entry_port", "INTEGER")):
+        for col, decl in (("timeout", "REAL"), ("verify", "INTEGER"), ("client_cert", "TEXT"), ("entry_port", "INTEGER"), ("isf", "TEXT")):
             if col not in existing:
                 conn.execute(f"ALTER TABLE collection ADD COLUMN {col} {decl}")
 
@@ -63,8 +63,8 @@ class CollectionStore:
                     name, created_at, method, url, headers, body,
                     target_host, target_port, config_file, worker_count,
                     with_encryption, recipient_pubkey_path, with_timing_defense,
-                    timeout, verify, client_cert, entry_port
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    timeout, verify, client_cert, entry_port, isf
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.get("name") or "Untitled request",
@@ -87,6 +87,7 @@ class CollectionStore:
                     1 if entry.get("verify", True) else 0,
                     entry.get("client_cert"),
                     entry.get("entry_port"),
+                    entry.get("isf") or None,  # the name of one of your ISFs, or NULL for a plain route
                 ),
             )
             conn.commit()

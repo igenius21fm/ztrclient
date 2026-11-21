@@ -13,6 +13,7 @@
 #   ztr_ssh [ssh_flags...] myuser@example._ztr --rp 22 [--config-file route.ztr] [--cp 2223] [--keep-host-key] [--copy-id]
 #   ztr_ssh [ssh_flags...] --rh "example._ztr" --rp 22 ...   (the long form of the same thing)
 #   ztr_ssh --routes [--cp 2223]
+#   ztr_ssh [ssh_flags...] --isf [NAME] myuser@host.example.com   (through one of your ISFs — see below)
 #
 # The SSH-style "user@host" is sugar: it is turned into "-l user --rh host" before anything else runs, so you can type
 # `ztr_ssh me@box._ztr` instead of `ztr_ssh -l me --rh box._ztr`. Only the form WITH an @ is a destination; a bare host
@@ -32,6 +33,12 @@
 # --config-file (optional) is the filename of a .ztr in routes/ — this one
 # session goes through that route. Leave it off and the session uses the
 # service's own default route.
+#
+# --isf [NAME] sends the session through one of your own ISFs (Intermediate Server Forwarders; see ztr_isf_client.py
+# and ~/.ztr_isf/isfs.json): this machine -> ZTRelay -> your ISF -> the server, so the exit hop only ever sees the ISF.
+# A bare --isf means your default ISF. The route is then the ISF's own unless you give --config-file. The server must
+# be a real host name or address — an ISF can't look up ._ztr aliases — and the ISF must allow it. The addresses of
+# the hops and of the ISF are masked in the lines printed before ssh starts.
 #
 # ssh_flags are plain ssh options (-i identity, -l user, ciphers, etc.) —
 # no destination. This script always supplies the destination itself —
@@ -78,6 +85,7 @@ REAL_HOST=""
 REAL_PORT="22"
 CONTROL_PORT="2223"
 CONFIG_FILE=""
+ISF=""
 KEEP_HOST_KEY=0
 COPY_ID=0
 ROUTES=0
@@ -110,6 +118,16 @@ while [[ $# -gt 0 ]]; do
       fi
       CONFIG_FILE="$2"
       shift 2
+      ;;
+    --isf)
+      # --isf [NAME]: through one of your ISFs. A bare --isf (next word isn't a name) means your default one.
+      if [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        ISF="$2"
+        shift 2
+      else
+        ISF="@default"
+        shift
+      fi
       ;;
     --keep-host-key)
       KEEP_HOST_KEY=1
@@ -232,7 +250,7 @@ PY
 fi
 
 if [[ -z "$REAL_HOST" ]]; then
-  log_err "Usage: ztr_ssh [ssh_flags...] user@<._ztr alias or host> [--rp 22] [--config-file <name>.ztr] [--cp 2223] [--keep-host-key] [--copy-id | --routes]"
+  log_err "Usage: ztr_ssh [ssh_flags...] user@<._ztr alias or host> [--rp 22] [--config-file <name>.ztr] [--isf [NAME]] [--cp 2223] [--keep-host-key] [--copy-id | --routes]"
   log_err "   or: ztr_ssh [ssh_flags...] --rh <._ztr alias> --rp 22 ...   (user@host is sugar for -l user --rh host; use --rh when there is no user)"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
   exit 1
@@ -281,6 +299,11 @@ if [[ "$COPY_ID" -eq 1 ]]; then
         ;;
     esac
   done
+fi
+
+if [[ -n "$ISF" && "$REAL_HOST" == *._ztr ]]; then
+  log_err "an ISF can't look up ._ztr aliases — give the server's real host name or address with --isf"
+  exit 1
 fi
 
 if [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" == */* ]]; then
@@ -414,15 +437,22 @@ trap cleanup EXIT
 # because Ctrl+C eventually closed the whole session.
 trap 'cleanup; exit 143' TERM
 
-log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT}${CONFIG_FILE:+ (route ${CONFIG_FILE})} ..."
+ISF_NOTE=""
+if [[ -n "$ISF" ]]; then
+  ISF_NOTE=" through your ISF"
+  [[ "$ISF" != "@default" ]] && ISF_NOTE+=" $ISF"
+fi
+log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT}${CONFIG_FILE:+ (route ${CONFIG_FILE})}${ISF_NOTE} ..."
 
 START_PAYLOAD=$(python3 -c "
 import json, sys
 req = {'cmd': 'start', 'relay_name': sys.argv[1], 'target_port': int(sys.argv[2])}
 if sys.argv[3]:
     req['config_file'] = sys.argv[3]
+if sys.argv[4]:
+    req['isf'] = sys.argv[4]
 print(json.dumps(req))
-" "$REAL_HOST" "$REAL_PORT" "$CONFIG_FILE")
+" "$REAL_HOST" "$REAL_PORT" "$CONFIG_FILE" "$ISF")
 
 RESPONSE=$(control_request "$START_PAYLOAD")
 if [[ -z "$RESPONSE" ]]; then
@@ -444,6 +474,27 @@ if [[ "$OK" != "True" ]]; then
   exit 1
 fi
 
+# Through an ISF: the service must say it used one. A service from before ISF support ignores "isf" and would connect
+# without it — never carry on in that case.
+if [[ -n "$ISF" ]]; then
+  ISF_USED=$(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+print(d.get('isf') or '')
+for line in d.get('path') or []:
+    print(line)
+" "$RESPONSE")
+  ISF_NAME_USED="${ISF_USED%%$'\n'*}"
+  if [[ -z "$ISF_NAME_USED" ]]; then
+    log_err "this tunnel service doesn't support ISFs (it connected without one) — update ztr_tunnel_lp.py and restart the service"
+    cleanup
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && log_info "ISF: $line"
+  done < <(printf '%s\n' "$ISF_USED" | tail -n +2)
+fi
+
 if [[ "$COPY_ID" -eq 1 ]]; then
   log_ok "tunnel ready on ${LOCAL_IP}:${LOCAL_PORT} (session ${SESSION_ID}), installing your key with ssh-copy-id ..."
   maybe_offer_hostkey_config "$LOCAL_IP"
@@ -455,6 +506,10 @@ if [[ "$COPY_ID" -eq 1 ]]; then
     [[ -n "$COPY_USER" ]] && login+=" -l ${COPY_USER}"
     login+=" --rh \"${REAL_HOST}\" --rp ${REAL_PORT}"
     [[ -n "$CONFIG_FILE" ]] && login+=" --config-file ${CONFIG_FILE}"
+    if [[ -n "$ISF" ]]; then
+      login+=" --isf"
+      [[ "$ISF" != "@default" ]] && login+=" $ISF"
+    fi
     log_ok "done. Log in with the key:  ${login}"
   fi
   exit "$COPY_EXIT"

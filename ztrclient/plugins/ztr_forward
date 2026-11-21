@@ -28,6 +28,12 @@
 # session goes through that route. Leave it off and the session uses the
 # service's own default route.
 #
+# --isf [NAME] sends the session through one of your own ISFs (Intermediate Server Forwarders; see ztr_isf_client.py):
+# this machine -> ZTRelay -> your ISF -> the server, so the exit hop only ever sees the ISF. A bare --isf means your
+# default ISF. The route is then the ISF's own unless you give --config-file. --rh must be a real host name or address
+# (an ISF can't look up ._ztr aliases) and the ISF must allow it. The addresses of the hops and of the ISF are masked in
+# what is printed.
+#
 # Requires ztr_tunnel_lp.py already running as a service — this script only
 # talks to its control port, it doesn't start or stop it.
 #
@@ -54,6 +60,7 @@ REAL_HOST=""
 REAL_PORT=""
 CONTROL_PORT="2223"
 CONFIG_FILE=""
+ISF=""
 CMD_ARGS=()
 HAS_CMD=0
 
@@ -79,6 +86,16 @@ while [[ $# -gt 0 ]]; do
       CONFIG_FILE="$2"
       shift 2
       ;;
+    --isf)
+      # --isf [NAME]: through one of your ISFs. A bare --isf (next word isn't a name) means your default one.
+      if [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        ISF="$2"
+        shift 2
+      else
+        ISF="@default"
+        shift
+      fi
+      ;;
     --)
       shift
       HAS_CMD=1
@@ -87,7 +104,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       log_err "unrecognized argument: $1"
-      log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--config-file <name>.ztr] [--cp 2223] [-- command args...]"
+      log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--config-file <name>.ztr] [--isf [NAME]] [--cp 2223] [-- command args...]"
       exit 1
       ;;
   esac
@@ -96,6 +113,11 @@ done
 if [[ -z "$REAL_HOST" || -z "$REAL_PORT" ]]; then
   log_err "Usage: ztr_forward --rh <._ztr alias> --rp <port> [--config-file <name>.ztr] [--cp 2223] [-- command args...]"
   log_err "(ztr_tunnel_lp.py must already be running as a service — this script only talks to its control port)"
+  exit 1
+fi
+
+if [[ -n "$ISF" && "$REAL_HOST" == *._ztr ]]; then
+  log_err "an ISF can't look up ._ztr aliases — give the server's real host name or address with --isf"
   exit 1
 fi
 
@@ -144,15 +166,22 @@ trap cleanup EXIT
 # blocking, below — there, Ctrl+C IS the intended way to stop.
 trap 'cleanup; exit 143' TERM
 
-log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT}${CONFIG_FILE:+ (route ${CONFIG_FILE})} ..."
+ISF_NOTE=""
+if [[ -n "$ISF" ]]; then
+  ISF_NOTE=" through your ISF"
+  [[ "$ISF" != "@default" ]] && ISF_NOTE+=" $ISF"
+fi
+log_info "requesting tunnel for ${REAL_HOST}:${REAL_PORT}${CONFIG_FILE:+ (route ${CONFIG_FILE})}${ISF_NOTE} ..."
 
 START_PAYLOAD=$(python3 -c "
 import json, sys
 req = {'cmd': 'start', 'relay_name': sys.argv[1], 'target_port': int(sys.argv[2])}
 if sys.argv[3]:
     req['config_file'] = sys.argv[3]
+if sys.argv[4]:
+    req['isf'] = sys.argv[4]
 print(json.dumps(req))
-" "$REAL_HOST" "$REAL_PORT" "$CONFIG_FILE")
+" "$REAL_HOST" "$REAL_PORT" "$CONFIG_FILE" "$ISF")
 
 RESPONSE=$(control_request "$START_PAYLOAD")
 if [[ -z "$RESPONSE" ]]; then
@@ -172,6 +201,27 @@ if [[ "$OK" != "True" ]]; then
   log_err "failed to start tunnel: ${ERROR_MSG:-unknown error}"
   SESSION_ID=""   # nothing to end — the service never created a session
   exit 1
+fi
+
+# Through an ISF: the service must say it used one. A service from before ISF support ignores "isf" and would connect
+# without it — never carry on in that case.
+if [[ -n "$ISF" ]]; then
+  ISF_USED=$(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+print(d.get('isf') or '')
+for line in d.get('path') or []:
+    print(line)
+" "$RESPONSE")
+  ISF_NAME_USED="${ISF_USED%%$'\n'*}"
+  if [[ -z "$ISF_NAME_USED" ]]; then
+    log_err "this tunnel service doesn't support ISFs (it connected without one) — update ztr_tunnel_lp.py and restart the service"
+    cleanup
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && log_info "ISF: $line"
+  done < <(printf '%s\n' "$ISF_USED" | tail -n +2)
 fi
 
 if [[ "$HAS_CMD" -eq 1 ]]; then

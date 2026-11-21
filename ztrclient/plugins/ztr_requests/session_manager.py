@@ -33,30 +33,36 @@ class SessionManager:
     # Session pins every tunnel it opens to one entry lane, so a different
     # choice needs its own Session, and auto must never quietly reuse a
     # connection that was opened on a lane someone chose by hand.
+    #
+    # isf (None = the exit hop connects to the site) is part of the key as well:
+    # a Session sends every connection through one ISF or none, so a different
+    # choice needs its own Session, and a plain route must never quietly reuse
+    # a connection that was opened through an ISF (or the other way round).
     @staticmethod
-    def _key(config_file, with_timing_defense, verify=True, cert=None, entry_port=None):
-        return (config_file, bool(with_timing_defense), verify, cert, entry_port)
+    def _key(config_file, with_timing_defense, verify=True, cert=None, entry_port=None, isf=None):
+        return (config_file, bool(with_timing_defense), verify, cert, entry_port, isf or None)
 
-    def get_or_create(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None):
-        key = self._key(config_file, with_timing_defense, verify, cert, entry_port)
+    def get_or_create(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None, isf=None):
+        key = self._key(config_file, with_timing_defense, verify, cert, entry_port, isf)
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
                 session = ztr_https.Session(
-                    config_file=config_file,
+                    config_file=config_file or None,
                     with_timing_defense=with_timing_defense,
                     verify=verify,
                     cert=cert,
                     entry_port=entry_port,
+                    isf=isf or None,
                 )
                 self._sessions[key] = session
             return session
 
-    def drop(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None):
+    def drop(self, config_file, with_timing_defense=False, verify=True, cert=None, entry_port=None, isf=None):
         """Evicts a cached Session (e.g. after a request against it fails)
         so the next request opens fresh tunnels instead of reusing
         connections that may now be wedged."""
-        key = self._key(config_file, with_timing_defense, verify, cert, entry_port)
+        key = self._key(config_file, with_timing_defense, verify, cert, entry_port, isf)
         with self._lock:
             session = self._sessions.pop(key, None)
         if session is not None:
@@ -67,7 +73,7 @@ class SessionManager:
         with self._lock:
             items = list(self._sessions.items())
         out = []
-        for (config_file, with_timing_defense, verify, cert, entry_port), session in items:
+        for (config_file, with_timing_defense, verify, cert, entry_port, isf), session in items:
             origins = [f"{scheme}://{host}:{port}" for (scheme, host, port) in session._connections]
             out.append({
                 "config_file": config_file,
@@ -82,6 +88,8 @@ class SessionManager:
                 # None = auto. Same reasoning as client_cert above: the
                 # disconnect button re-POSTs this exact row back.
                 "entry_port": entry_port,
+                # None = a plain route. Re-POSTed with the row, like the fields above.
+                "isf": isf,
                 "origins": origins,
             })
         return out

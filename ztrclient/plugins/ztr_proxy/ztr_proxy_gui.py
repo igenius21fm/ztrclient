@@ -55,6 +55,7 @@ DEFAULT_SETTINGS = {
     "idle": 0,  # seconds a connection may sit quiet before it is closed; 0 = never
     "mask": False,  # show host names and addresses abbreviated on screen
     "upgrade_http": True,  # redirect plain http:// to https:// instead of carrying it in the clear
+    "isf": "",  # the name of one of your ISFs to send everything through; "" = the exit hop connects to the sites
 }
 
 BG, CARD, FIELD, BORDER = "#1c1c1e", "#262629", "#1a1a1c", "#3a3a3d"
@@ -1674,8 +1675,19 @@ def build_app():
             self.route_note = ttk.Label(rb, text="", style="Dim.TLabel")
             self.route_note.grid(row=0, column=2, sticky="e")
             Btn(rb, text="Measure", style="Ghost.TButton", command=lambda: self.refresh_route_card(probe=True)).grid(row=0, column=3, padx=(10, 0))
+            ttk.Label(rb, text="VIA ISF", style="Dim.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(8, 0))
+            self.isf_var = tk.StringVar(value=self.settings.get("isf", ""))   # the ISF's name, "" = none
+            self.isf_text = tk.StringVar(value="")   # what the dropdown shows
+            self._isf_names = {}
+            self.isf_combo = Combo(rb, compact=True, textvariable=self.isf_text, state="readonly", width=28, values=[])
+            self.isf_combo.grid(row=1, column=1, sticky="w", pady=(8, 0))
+            self.isf_combo.inner.bind("<<ComboboxSelected>>", lambda e: self.on_isf_picked())
+            self.isf_combo.inner.configure(postcommand=self.refresh_isf_choices)   # an ISF added while this window is open shows up
+            self.isf_note = ttk.Label(rb, text="", style="Dim.TLabel")
+            self.isf_note.grid(row=1, column=2, sticky="e", pady=(8, 0))
+            self.refresh_isf_choices()
             self.chain = ChainView(rb)
-            self.chain.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+            self.chain.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
             # page tabs
             self.tabbar = tk.Frame(page, bg=BG)
@@ -3035,6 +3047,11 @@ def build_app():
             if not self.route_ok():
                 self.toast("Pick a route first.", "warn")
                 return
+            isf = self.isf_var.get() or None
+            if isf and isf not in [i["name"] for i in ztr_proxy.ztr_https.list_isfs()]:
+                self.toast("That ISF isn't set up any more — pick another, or None.", "warn")
+                self.refresh_isf_choices()
+                return
             self.settings["route"] = self.route_var.get()
             save_settings(self.settings)
             self.set_state("starting")
@@ -3043,7 +3060,7 @@ def build_app():
                 s["route"], host=(s.get("host") or None), port=int(s["port"]), warm_pool=bool(s["warm"]),
                 warm_max_age=float(s["max_age"]), warm_min_uses=int(s["min_uses"]), timing_defense=bool(s["timing"]),
                 pinned=[tuple(p) for p in s.get("pinned", [])], idle_timeout=int(s.get("idle") or 0),
-                upgrade_http=bool(s.get("upgrade_http", True)))
+                upgrade_http=bool(s.get("upgrade_http", True)), isf=isf)
 
             def work():
                 try:
@@ -3092,6 +3109,40 @@ def build_app():
             self.addr_http.configure(text=f"{host}:{port}")
             self.addr_socks.configure(text=f"socks5h://{host}:{port}")
 
+        # ── ISF choice ───────────────────────────────────────────────────
+        NO_ISF = "None — the exit hop connects to the site"
+
+        def refresh_isf_choices(self):
+            """Rebuilds the dropdown from the ISFs set up on this machine (the list isf_ssh and the ISF dashboard manage)."""
+            isfs = ztr_proxy.ztr_https.list_isfs()
+            self._isf_names = {self.NO_ISF: ""}
+            for i in isfs:
+                self._isf_names[f"{i['name']}{' ★' if i['default'] else ''}  ·  {i['host']}  ·  {i['route']}"] = i["name"]
+            self.isf_combo.inner.configure(values=list(self._isf_names))
+            current = self.isf_var.get()
+            if current and current not in [i["name"] for i in isfs]:
+                current = ""
+                self.isf_var.set("")
+                self.settings["isf"] = ""
+                save_settings(self.settings)
+            self.isf_text.set(next((k for k, v in self._isf_names.items() if v == current), self.NO_ISF))
+            self.isf_note.configure(text="" if isfs else "No ISFs set up yet — add one with isf_ssh --save or the ISF dashboard")
+
+        def on_isf_picked(self):
+            name = self._isf_names.get(self.isf_text.get(), "")
+            self.isf_var.set(name)
+            self.settings["isf"] = name
+            if name:  # an ISF brings its own route; the route list above can still override it
+                route = next((i["route"] for i in ztr_proxy.ztr_https.list_isfs() if i["name"] == name), "")
+                if route and route in list_routes():
+                    self.route_var.set(route)
+                    self.settings["route"] = route
+            save_settings(self.settings)
+            if self.state == "running":
+                self.toast("Stop and start the proxy for the ISF choice to take effect.", "info", 3200)
+            self.rtts = {}
+            self.refresh_route_card(probe=True)
+
         # ── route card ───────────────────────────────────────────────────
         def on_route_picked(self):
             shown = self.route_text.get()
@@ -3131,13 +3182,17 @@ def build_app():
 
         def draw_chain(self):
             chain = route_chain(self.route_var.get())
+            isf = self.isf_var.get()
+            isf_info = next((i for i in ztr_proxy.ztr_https.list_isfs() if i["name"] == isf), None) if isf else None
             nodes = [("This computer", "you", "you")]
             for role, address in chain:
                 ms = self.rtts.get(address)
                 shown = "hidden hop" if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", address) else address
                 sub = shown if ms is None else f"{shown} · {ms:.0f} ms"
                 country = route_country(self.route_var.get()) if role == "exit" else ""
-                nodes.append(((role.title() or "Hop") + (f" · {country}" if country else ""), sub, "exit" if role == "exit" else "hop"))
+                nodes.append(((role.title() or "Hop") + (f" · {country}" if country else ""), sub, "exit" if role == "exit" and not isf_info else "hop"))
+            if chain and isf_info:
+                nodes.append((f"Your ISF · {isf_info['name']}", isf_info["host"], "exit"))  # the machine that really connects to the site
             if chain:
                 nodes.append(("Internet", "the site you visit", "net"))
             else:
@@ -3926,12 +3981,25 @@ def main():
     parser = argparse.ArgumentParser(description="A window for the ZTRelay proxy.")
     parser.add_argument("--route", help="a route file in routes/ (default: the one used last)")
     parser.add_argument("--start", action="store_true", help="start the proxy as soon as the window opens")
+    parser.add_argument("--isf", nargs="?", const="@default", default=None, metavar="NAME", help="send everything through one of your own ISFs (just --isf = your default one; --isf none goes back to the plain route). Remembered in the window's settings, like the route")
     parser.add_argument("--write-icon", metavar="PATH", help="write the window's icon to PATH as a PNG and exit (the installer uses it for the applications-menu entry)")
     args = parser.parse_args()
     if args.write_icon:
         Path(args.write_icon).parent.mkdir(parents=True, exist_ok=True)
         Path(args.write_icon).write_bytes(logo_png(128))
         return
+    if args.isf is not None:
+        try:
+            name = "" if args.isf.lower() in ("none", "off", "no") else ztr_proxy.ztr_https.check_isf(args.isf)
+        except ValueError as e:
+            parser.error(str(e))
+        settings = load_settings()
+        settings["isf"] = name or ""
+        if name and not args.route:  # an ISF brings its own route, as when it is picked in the window
+            route = next((i["route"] for i in ztr_proxy.ztr_https.list_isfs() if i["name"] == name), "")
+            if route in list_routes():
+                settings["route"] = route
+        save_settings(settings)
     App, tk = build_app()
     root = tk.Tk()
     App(root, route=args.route, autostart=args.start)
